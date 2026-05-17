@@ -1,0 +1,19 @@
+[package]
+name = "spark"
+version = "0.1.0"
+description = "Apache Spark client for stryke. Submits via spark-submit with an embedded PySpark driver; returns NDJSON rows. Universal across Spark 3.x clusters."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-spark"
+edition = "2026"
+
+[bin]
+spark = "bin/spark.stk"
+spark-build = "bin/spark-build.stk"
+
+[scripts]
+build = "cargo build --release"
+build-debug = "cargo build"
+clean = "cargo clean"
+test = "s test t/"
+install = "s pkg install -g ."

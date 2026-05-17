@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --locked
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --no-fail-fast
+
+  helper-local-spark:
+    name: Helper end-to-end (local[*] Spark)
+    runs-on: ubuntu-latest
+    env:
+      SPARK_VERSION: "3.5.3"
+      HADOOP_PROFILE: "hadoop3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python (for PySpark)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Spark
+        run: |
+          set -euo pipefail
+          curl -fsSL -o spark.tgz "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}.tgz"
+          tar xzf spark.tgz
+          mv "spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}" /opt/spark
+          echo "SPARK_HOME=/opt/spark" >> "$GITHUB_ENV"
+          echo "/opt/spark/bin" >> "$GITHUB_PATH"
+          pip install "pyspark==${SPARK_VERSION}"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release --locked
+
+      - name: spark-submit ping
+        run: ./target/release/stryke-spark-helper ping
+
+      - name: Round-trip (query / columnar / range / databases)
+        run: |
+          set -euo pipefail
+          H=./target/release/stryke-spark-helper
+          $H query "SELECT 1 + 1 AS two, 'hi' AS s" | jq -e '.two == 2 and .s == "hi"'
+          $H query "SELECT id FROM range(5)" --columnar | jq -e '.num_rows == 5'
+          $H query "SELECT id FROM range(10000)" --limit 3 | wc -l | tr -d ' ' | grep -x 3
+          $H databases | jq -e '.name == "default"'
+          $H query "SELECT array(1,2,3) AS a, struct(1 AS x, 'y' AS y) AS s" \
+            | jq -e '.a == [1,2,3] and .s.x == 1 and .s.y == "y"'
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+  release-build:
+    name: Release Build (${{ matrix.target }})
+    needs: [check, test, helper-local-spark]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stryke-spark-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/stryke-spark-helper

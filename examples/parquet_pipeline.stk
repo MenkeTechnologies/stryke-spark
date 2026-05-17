@@ -1,0 +1,43 @@
+#!/usr/bin/env stryke
+# examples/parquet_pipeline.stk — read a parquet file with SparkSQL.
+# Demonstrates pairing stryke-spark with stryke-arrow: arrow writes the
+# input, spark crunches it, and the answer comes back as plain stryke rows.
+#
+# Needs `use Arrow` available (stryke-arrow installed). Skips with a note
+# if it isn't.
+
+use Spark
+
+my $tmp = "/tmp/stryke-spark-demo-$$"
+my $path = "$tmp/orders.parquet"
+mkdir $tmp unless -d $tmp
+
+my $have_arrow = eval { require "Arrow.stk"; 1 }
+unless ($have_arrow) {
+    p "Set up: install stryke-arrow, then rerun this example."
+    p "We'll just SELECT directly from a Spark range() instead."
+    my @rows = Spark::query "SELECT id, id * 100 AS amount FROM range(5)"
+    p to_json $_ for @rows
+    exit 0
+}
+
+# Write a sample parquet file via arrow.
+my @orders = map {
+    { order_id => $_, customer => "cust_" . ($_ % 3), amount => $_ * 13.7 }
+} (1:200)
+Arrow::write($path, \@orders, format => "parquet", compression => "zstd")
+
+# Spark reads it back. read_files() works for any path Spark can resolve.
+my @summary = Spark::query "
+    SELECT customer, COUNT(*) AS orders, SUM(amount) AS revenue
+    FROM read_files('$path', format => 'parquet')
+    GROUP BY customer
+    ORDER BY revenue DESC
+"
+p "customer revenue summary:"
+for my $r (@summary) {
+    p "  $r->{customer}: $r->{orders} orders, $r->{revenue}"
+}
+
+unlink $path if -e $path
+rmdir $tmp if -d $tmp

@@ -1,0 +1,76 @@
+# t/test_spark.stk — round-trip tests against a local Spark session.
+#
+# Each Spark::* call spins a fresh JVM (~5–10s), so the suite is
+# intentionally small. Skips cleanly when `spark-submit` isn't on PATH or
+# the helper isn't built.
+
+require "./lib/Spark.stk"
+
+my $have_helper = eval { Spark::helper_path(); 1 }
+my $have_submit = system("command -v spark-submit >/dev/null 2>&1") == 0
+
+unless ($have_helper) {
+    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+    exit 0
+}
+unless ($have_submit) {
+    p "1..0 # SKIP spark-submit not on PATH"
+    exit 0
+}
+
+p "1..6"
+my $i = 0
+
+# 1. Ping
+my $ok
+eval { $ok = Spark::ping() }
+$i++
+p $@ ? "not ok $i - ping: $@" : ($ok ? "ok $i - ping" : "not ok $i - ping returned false")
+
+# 2. Plain SELECT.
+my @rows
+eval { @rows = Spark::query("SELECT 1 + 1 AS two, 'hi' AS s") }
+$i++
+p $@ ? "not ok $i - simple query: $@" :
+       (len(@rows) == 1 && $rows[0]->{two} == 2 && $rows[0]->{s} eq "hi"
+            ? "ok $i - simple query"
+            : "not ok $i - simple query wrong: " . to_json(\@rows))
+
+# 3. range() table-valued fn.
+eval { @rows = Spark::query("SELECT id FROM range(5) ORDER BY id") }
+$i++
+p $@ ? "not ok $i - range: $@" :
+       (len(@rows) == 5 && $rows[4]->{id} == 4
+            ? "ok $i - range (5 rows)"
+            : "not ok $i - range wrong shape (got " . len(@rows) . ")")
+
+# 4. Scalar shortcut.
+my $n
+eval { $n = Spark::query_scalar("SELECT COUNT(*) AS n FROM range(10)") }
+$i++
+p $@ ? "not ok $i - query_scalar: $@" :
+       ($n == 10 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $n")
+
+# 5. Columnar.
+my $cw
+eval { $cw = Spark::query("SELECT id FROM range(3)", columnar => 1) }
+$i++
+p $@ ? "not ok $i - columnar: $@" :
+       (ref($cw) eq "HASH" && $cw->{num_rows} == 3 && len(@{$cw->{rows}}) == 3
+            ? "ok $i - columnar"
+            : "not ok $i - columnar bad shape")
+
+# 6. Databases (at least `default`).
+my @dbs
+eval { @dbs = Spark::databases() }
+$i++
+if ($@) {
+    p "not ok $i - databases: $@"
+} else {
+    my $found_default = 0
+    for my $d (@dbs) {
+        $found_default = 1 if $d eq "default"
+    }
+    p ($found_default ? "ok $i - databases (saw default)" :
+       "not ok $i - databases missing 'default' (got " . join(",", @dbs) . ")")
+}

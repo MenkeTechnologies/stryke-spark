@@ -1,0 +1,19 @@
+#!/usr/bin/env stryke
+# examples/range_stats.stk — aggregate over a generated range.
+#
+# Run:    s examples/range_stats.stk [N]
+
+use Spark
+
+my $n = $ARGV[0] // 10_000_000
+
+my $r = Spark::query_one "
+    SELECT
+        COUNT(*) AS rows,
+        SUM(id) AS total,
+        AVG(id) AS mean,
+        MIN(id) AS min_id,
+        MAX(id) AS max_id
+    FROM range($n)
+"
+p "n=#{$r->{rows}} sum=#{$r->{total}} mean=#{$r->{mean}} min=#{$r->{min_id}} max=#{$r->{max_id}}"

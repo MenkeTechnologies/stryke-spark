@@ -1,0 +1,7 @@
+/target
+Cargo.lock
+/tmp
+spark-warehouse/
+metastore_db/
+derby.log
+*.parquet

@@ -1,0 +1,21 @@
+#!/usr/bin/env stryke
+# examples/quick_query.stk — run a SparkSQL query.
+#
+# Run:    s examples/quick_query.stk
+# Or:     SPARK_MASTER='spark://prod:7077' s examples/quick_query.stk
+
+use Spark
+
+my @rows = Spark::query "
+    WITH t AS (
+        SELECT 'alice' AS name, 1.5 AS score UNION
+        SELECT 'bob',           2.0          UNION
+        SELECT 'charlie',       3.25
+    )
+    SELECT name, score, score * 2 AS doubled
+    FROM t
+    ORDER BY score DESC
+"
+for my $r (@rows) {
+    p "$r->{name}: $r->{score} (doubled = $r->{doubled})"
+}

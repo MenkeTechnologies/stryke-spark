@@ -1,0 +1,345 @@
+# lib/Spark.stk — Apache Spark client for stryke.
+#
+# Wraps the `stryke-spark-helper` Rust binary, which shells out to
+# `spark-submit` running an embedded PySpark driver. Output is NDJSON rows
+# on stdout — one row per `df.toJSON()` element.
+#
+# Universal mode: works against any Spark 3.x / 4.x cluster reachable by
+# `spark-submit`. The default `--master local[*]` runs a self-contained
+# local Spark for one-shot scripts.
+#
+# Each call spins up a fresh JVM (5–10s warmup typical). For interactive /
+# hot-loop work, prefer a single multi-statement SQL (CTEs, subqueries) or
+# wait for the persistent serve mode once stryke gains a Unix-socket
+# client builtin.
+#
+# Internal helpers pass `$opts` as a hashref because stryke currently
+# drops named opts when reslurped through nested same-package fn calls
+# loaded from a required file. Public API still accepts `%opts`.
+
+package Spark
+
+our $HELPER
+
+fn Spark::pkg_root {
+    my @parts = split "/", __FILE__
+    pop @parts
+    pop @parts
+    my $root = join "/", @parts
+    $root ne "" ? $root : "."
+}
+
+fn Spark::helper_path {
+    return $Spark::HELPER if defined $Spark::HELPER && -x $Spark::HELPER
+
+    if (exists $ENV{STRYKE_SPARK_HELPER} && $ENV{STRYKE_SPARK_HELPER} ne "") {
+        my $p = $ENV{STRYKE_SPARK_HELPER}
+        die "stryke-spark: STRYKE_SPARK_HELPER=$p is not an executable file" unless -x $p
+        $Spark::HELPER = $p
+        return $p
+    }
+
+    my $root = Spark::pkg_root()
+    for my $cand (
+        "$root/target/release/stryke-spark-helper",
+        "$root/target/debug/stryke-spark-helper",
+        "$root/bin/stryke-spark-helper",
+    ) {
+        if (-x $cand) {
+            $Spark::HELPER = $cand
+            return $cand
+        }
+    }
+
+    my $which = qx{command -v stryke-spark-helper 2>/dev/null}
+    chomp $which
+    if ($which ne "" && -x $which) {
+        $Spark::HELPER = $which
+        return $which
+    }
+
+    die "stryke-spark: helper binary not found.\n" .
+        "  Build it once with:  cd $root && cargo build --release\n" .
+        "  Or set STRYKE_SPARK_HELPER=/path/to/stryke-spark-helper\n"
+}
+
+fn Spark::ensure_built {
+    my $root = Spark::pkg_root()
+    for my $cand ("$root/target/release/stryke-spark-helper",
+                  "$root/target/debug/stryke-spark-helper") {
+        return $cand if -x $cand
+    }
+    return Spark::helper_path() if exists $ENV{STRYKE_SPARK_HELPER}
+
+    p "stryke-spark: building helper (cargo build --release)..."
+    my $rc = system "cd " . Spark::_shq($root) . " && cargo build --release"
+    die "stryke-spark: cargo build failed (rc=$rc)" if $rc != 0
+    Spark::helper_path()
+}
+
+fn Spark::_shq ($s) {
+    my $t = $s
+    $t =~ s/'/'\\''/g
+    "'$t'"
+}
+
+# Build the leading `helper …connection-flags…` portion of the argv.
+# $o is a hashref. Conf entries can be given as a hashref `conf => {k=>v,…}`
+# or an arrayref `conf => ["k=v","k2=v2"]`.
+fn Spark::_conn_argv ($o) {
+    my @argv = (Spark::_shq(Spark::helper_path()))
+
+    my $master = $o->{master} // $ENV{SPARK_MASTER}
+    push @argv, "--master", Spark::_shq($master) if defined $master && $master ne ""
+
+    push @argv, "--spark-home",   Spark::_shq($o->{spark_home})   if defined $o->{spark_home}
+    push @argv, "--spark-submit", Spark::_shq($o->{spark_submit}) if defined $o->{spark_submit}
+    push @argv, "--app-name",     Spark::_shq($o->{app_name})     if defined $o->{app_name}
+    push @argv, "--deploy-mode",  Spark::_shq($o->{deploy_mode})  if defined $o->{deploy_mode}
+    push @argv, "--packages",     Spark::_shq($o->{packages})     if defined $o->{packages}
+    push @argv, "--jars",         Spark::_shq($o->{jars})         if defined $o->{jars}
+    push @argv, "--database",     Spark::_shq($o->{database})     if defined $o->{database}
+
+    if (defined $o->{conf}) {
+        my @kvs
+        if (ref($o->{conf}) eq "HASH") {
+            for my $k (sort keys %{ $o->{conf} }) {
+                push @kvs, "$k=" . $o->{conf}{$k}
+            }
+        } elsif (ref($o->{conf}) eq "ARRAY") {
+            @kvs = @{ $o->{conf} }
+        } else {
+            push @kvs, $o->{conf}
+        }
+        for my $kv (@kvs) {
+            push @argv, "--conf", Spark::_shq($kv)
+        }
+    }
+    @argv
+}
+
+fn Spark::_drain_ndjson ($fh) {
+    my @rows
+    while (my $line = <$fh>) {
+        chomp $line
+        next if $line eq ""
+        # Driver may emit stray log lines; only collect JSON-shaped lines.
+        next unless $line =~ /^[{\[]/
+        push @rows, from_json $line
+    }
+    @rows
+}
+
+fn Spark::_run_ndjson ($argv) {
+    my $cmd = join " ", @$argv
+    if ($ENV{STRYKE_SPARK_DEBUG}) {
+        warn "DEBUG spark cmd: $cmd\n"
+    }
+    open my $fh, "-|", $cmd or die "stryke-spark: spawn failed: $!"
+    my @rows = Spark::_drain_ndjson $fh
+    close $fh or die "stryke-spark: helper exited ($?)"
+    @rows
+}
+
+fn Spark::_run_json ($argv) {
+    my $cmd = join " ", @$argv
+    if ($ENV{STRYKE_SPARK_DEBUG}) {
+        warn "DEBUG spark cmd: $cmd\n"
+    }
+    my $out = qx{$cmd}
+    die "stryke-spark: helper exited ($?)" if $? != 0
+    # Skip log noise and grab the last JSON-shaped line as the result.
+    my $payload
+    for my $line (split /\n/, $out) {
+        next unless $line =~ /^[{\[]/
+        $payload = $line
+    }
+    die "stryke-spark: helper produced no JSON output" unless defined $payload
+    from_json $payload
+}
+
+# ---------------------------------------------------------------------------
+# Public read API
+# ---------------------------------------------------------------------------
+
+fn Spark::query ($sql, %opts) {
+    Spark::_query_impl($sql, \%opts)
+}
+
+fn Spark::_query_impl ($sql, $o) {
+    my @argv = Spark::_conn_argv($o)
+    push @argv, "query", Spark::_shq($sql)
+    push @argv, "--columnar" if $o->{columnar}
+    push @argv, "--with-meta" if $o->{with_meta}
+    if (defined $o->{limit}) {
+        push @argv, "--limit", Spark::_shq($o->{limit})
+    }
+
+    if ($o->{columnar}) {
+        return Spark::_run_json(\@argv)
+    }
+    if ($o->{with_meta}) {
+        my $cmd = join " ", @argv
+        my $out = qx{$cmd}
+        die "Spark::query: helper exited ($?)" if $? != 0
+        return Spark::_parse_metarows($out)
+    }
+    Spark::_run_ndjson(\@argv)
+}
+
+fn Spark::_parse_metarows ($buf) {
+    my @lines = split /\n/, $buf
+    my @rows
+    my $meta = {}
+    for my $line (@lines) {
+        next unless $line =~ /^[{\[]/
+        my $v = from_json $line
+        if (ref($v) eq "HASH" && exists $v->{meta}) {
+            $meta = $v->{meta}
+        } else {
+            push @rows, $v
+        }
+    }
+    { meta => $meta, rows => \@rows }
+}
+
+# Streaming variant. Spark batches the result in the driver, so this still
+# pulls all rows into the driver's memory; the streaming is purely on the
+# stryke side.
+fn Spark::query_stream ($sql, %opts) {
+    my $cb = $opts{callback}
+    die "Spark::query_stream: callback => sub { … } is required" unless defined $cb
+
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "query", Spark::_shq($sql)
+    if (defined $opts{limit}) {
+        push @argv, "--limit", Spark::_shq($opts{limit})
+    }
+    my $cmd = join " ", @argv
+
+    my $n = 0
+    open my $fh, "-|", $cmd or die "Spark::query_stream: spawn failed: $!"
+    while (my $line = <$fh>) {
+        chomp $line
+        next unless $line =~ /^[{\[]/
+        $cb->(from_json $line)
+        $n++
+    }
+    close $fh or die "Spark::query_stream: helper exited ($?)"
+    $n
+}
+
+fn Spark::query_one ($sql, %opts) {
+    $opts{limit} = 1
+    my @r = Spark::_query_impl($sql, \%opts)
+    @r ? $r[0] : undef
+}
+
+fn Spark::query_col ($sql, %opts) {
+    my @rows = Spark::_query_impl($sql, \%opts)
+    return () unless @rows
+    my @keys = keys %{ $rows[0] }
+    my $first = $keys[0]
+    map { $_->{$first} } @rows
+}
+
+fn Spark::query_scalar ($sql, %opts) {
+    $opts{limit} = 1
+    my @r = Spark::_query_impl($sql, \%opts)
+    return undef unless @r
+    my @keys = keys %{ $r[0] }
+    $r[0]->{$keys[0]}
+}
+
+# ---------------------------------------------------------------------------
+# DDL / DML
+# ---------------------------------------------------------------------------
+
+fn Spark::execute ($sql, %opts) {
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "execute", Spark::_shq($sql)
+    Spark::_run_json(\@argv)
+}
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+fn Spark::ping (%opts) {
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "ping"
+    my $cmd = join " ", @argv
+    my $out = qx{$cmd 2>/dev/null}
+    chomp $out
+    $? == 0 && $out =~ /\bok\b/
+}
+
+fn Spark::tables (%opts) {
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "tables"
+    map { $_->{name} } Spark::_run_ndjson(\@argv)
+}
+
+fn Spark::databases (%opts) {
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "databases"
+    map { $_->{name} } Spark::_run_ndjson(\@argv)
+}
+
+fn Spark::schema ($table, %opts) {
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "schema", "--table", Spark::_shq($table)
+    Spark::_run_json(\@argv)
+}
+
+fn Spark::dump ($table, %opts) {
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "dump", "--table", Spark::_shq($table)
+    if (defined $opts{columns}) {
+        my $cols = ref($opts{columns}) eq "ARRAY"
+            ? join(",", @{ $opts{columns} })
+            : $opts{columns}
+        push @argv, "--columns", Spark::_shq($cols)
+    }
+    if (defined $opts{where}) {
+        push @argv, "--where", Spark::_shq($opts{where})
+    }
+    if (defined $opts{order_by}) {
+        push @argv, "--order-by", Spark::_shq($opts{order_by})
+    }
+    if (defined $opts{limit}) {
+        push @argv, "--limit", Spark::_shq($opts{limit})
+    }
+    Spark::_run_ndjson(\@argv)
+}
+
+# ---------------------------------------------------------------------------
+# Submit pass-through
+# ---------------------------------------------------------------------------
+
+# Spark::submit($script_path, args => ["--foo","bar"], %opts) — runs the
+# script through spark-submit, inheriting the parent's stdout/stderr. Use
+# for `.py` / `.jar` (with --conf spark.application.class=...) workloads
+# that don't fit the SQL surface.
+fn Spark::submit ($script, %opts) {
+    die "Spark::submit: script `$script` not found" unless -e $script
+    my @argv = Spark::_conn_argv(\%opts)
+    push @argv, "submit", Spark::_shq($script)
+    if (defined $opts{args}) {
+        my @user = ref($opts{args}) eq "ARRAY" ? @{ $opts{args} } : ($opts{args})
+        push @argv, map { Spark::_shq($_) } @user
+    }
+    my $cmd = join " ", @argv
+    my $rc = system $cmd
+    die "Spark::submit: helper exited ($rc)" if $rc != 0
+    1
+}
+
+fn Spark::version {
+    my $bin = Spark::_shq(Spark::helper_path())
+    my $v = qx{$bin --version 2>&1}
+    chomp $v
+    $v
+}
+
+1
