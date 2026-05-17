@@ -1,7 +1,9 @@
 /target
-Cargo.lock
 /tmp
 spark-warehouse/
 metastore_db/
 derby.log
 *.parquet
+
+# Track Cargo.lock for binary crates — overrides ~/.gitignore_global *.lock.
+!Cargo.lock
