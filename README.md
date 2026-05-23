@@ -1,11 +1,47 @@
-# stryke-spark
+```
+ ███████╗████████╗██████╗ ██╗   ██╗██╗  ██╗███████╗
+ ██╔════╝╚══██╔══╝██╔══██╗╚██╗ ██╔╝██║ ██╔╝██╔════╝
+ ███████╗   ██║   ██████╔╝ ╚████╔╝ █████╔╝ █████╗
+ ╚════██║   ██║   ██╔══██╗  ╚██╔╝  ██╔═██╗ ██╔══╝
+ ███████║   ██║   ██║  ██║   ██║   ██║  ██╗███████╗
+ ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+                   [ s p a r k ]
+```
+
+[![CI](https://github.com/MenkeTechnologies/stryke-spark/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/stryke-spark/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
+
+### `[APACHE SPARK CLIENT FOR STRYKE // OPT-IN PACKAGE]`
+
+> *"Distributed compute from a stryke one-liner."*
 
 Apache Spark client for stryke. Opt-in package, kept out of the stryke core
 binary so the daily-driver install stays slim.
 
-Created by MenkeTechnologies.
+### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-arrow`](https://github.com/MenkeTechnologies/stryke-arrow) · [`stryke-parquet`](https://github.com/MenkeTechnologies/stryke-parquet) · [`stryke-kafka`](https://github.com/MenkeTechnologies/stryke-kafka) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
-## Why this is a package, not a builtin
+---
+
+## Table of Contents
+
+- [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Quick start](#0x02-quick-start)
+- [\[0x03\] CLI: `spark`](#0x03-cli-spark)
+- [\[0x04\] API reference](#0x04-api-reference)
+- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x06\] Type encoding](#0x06-type-encoding)
+- [\[0x07\] Bind parameters](#0x07-bind-parameters)
+- [\[0x08\] Performance notes](#0x08-performance-notes)
+- [\[0x09\] Tests](#0x09-tests)
+- [\[0x0A\] Dev workflow](#0x0a-dev-workflow)
+- [\[0x0B\] Layout](#0x0b-layout)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] Why this is a package, not a builtin
 
 Same rationale as the other `stryke-*` data packages: Spark integration
 requires the JVM, `spark-submit`, and PySpark on the host. Most stryke
@@ -18,7 +54,7 @@ binary (`stryke-spark-helper`, ~700 KB). The helper shells out to
 argv and writes NDJSON rows to stdout. Universal across Spark 3.x and 4.x
 — anywhere `spark-submit` runs, this works.
 
-## Install
+## [0x01] Install
 
 ```sh
 cd ~/projects/stryke-spark
@@ -48,7 +84,7 @@ JDK 17 environment is still the smoothest. Set `JAVA_HOME` before running:
 export JAVA_HOME=/path/to/jdk-17     # e.g. corretto-17, temurin-17
 ```
 
-## Quick start
+## [0x02] Quick start
 
 ```stryke
 use Spark
@@ -86,7 +122,7 @@ Spark::submit "jobs/etl_pipeline.py",
 Each Spark call spins up a fresh JVM (~5–10s warmup). For multi-statement
 work, prefer one SQL with CTEs / subqueries over many separate calls.
 
-## CLI: `spark`
+## [0x03] CLI: `spark`
 
 ```sh
 spark query     "SELECT id FROM range(10) WHERE id > 5"
@@ -116,7 +152,7 @@ Connection flags:
 -D, --database NAME         USE this database before running the command
 ```
 
-## API reference
+## [0x04] API reference
 
 ### Read paths
 
@@ -169,7 +205,7 @@ Spark::ensure_built()  → $abs_path
 Spark::version()       → "stryke-spark-helper 0.1.0"
 ```
 
-## Helper protocol
+## [0x05] Helper protocol
 
 ```sh
 stryke-spark-helper query    'SELECT 1 + 1 AS two'
@@ -200,7 +236,7 @@ The embedded PySpark driver lives in `src/driver.py` (compiled into the
 helper via `include_str!`). It writes to a temp file at run time so
 `spark-submit` can pick it up.
 
-## Type encoding
+## [0x06] Type encoding
 
 Spark `df.toJSON()` does the heavy lifting; types map to JSON as Spark's
 JSON serializer dictates:
@@ -223,7 +259,7 @@ JSON serializer dictates:
 The columnar path also coerces Python `date`/`datetime`/`Decimal` to
 strings if Spark's serializer leaves them as native Python objects.
 
-## Bind parameters
+## [0x07] Bind parameters
 
 Spark SQL doesn't accept positional binds the way Postgres / MySQL do (the
 3.5+ `args=` keyword on `SparkSession.sql` is gated on Connect for some
@@ -234,7 +270,7 @@ quoting at the Spark SQL level (`'string'`, numeric, date literals
 Bind support via the helper's request JSON can be added once a clean
 cross-version path exists.
 
-## Performance notes
+## [0x08] Performance notes
 
 * Each helper call boots a fresh JVM. Plan for ~5–10s startup per call.
 * Batch work into one `query` with CTEs / subqueries / temp views when
@@ -245,7 +281,7 @@ cross-version path exists.
   long-running standalone / YARN / k8s Spark cluster — the submit time is
   the same but the actual compute runs on warm executors.
 
-## Tests
+## [0x09] Tests
 
 ```sh
 cargo test                                       # unit tests (none yet)
@@ -255,7 +291,7 @@ JAVA_HOME=/path/to/jdk-17 s test t/              # end-to-end against local[*]
 The end-to-end suite skips cleanly when `spark-submit` isn't on PATH or
 the helper isn't built.
 
-## Dev workflow
+## [0x0A] Dev workflow
 
 ```sh
 make             # release build
@@ -265,7 +301,7 @@ make install     # release + pkg install -g .
 make clean
 ```
 
-## Layout
+## [0x0B] Layout
 
 ```
 stryke-spark/
@@ -291,6 +327,6 @@ stryke-spark/
     release.yml                  # cross-compile + GH release on tag push
 ```
 
-## License
+## [0xFF] License
 
 MIT.
