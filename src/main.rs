@@ -351,3 +351,278 @@ fn apply_common_args(cmd: &mut Command, cli: &Cli) {
 /// Quiet a few warnings the `OsStr` import would generate if unused.
 #[allow(dead_code)]
 fn _force_osstr(_: &OsStr) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn base_cli(cmd: Cmd) -> Cli {
+        Cli {
+            master: None,
+            spark_home: None,
+            spark_submit: None,
+            conf: vec![],
+            packages: None,
+            jars: None,
+            app_name: "stryke-spark".into(),
+            deploy_mode: None,
+            database: None,
+            cmd,
+        }
+    }
+
+    // ─── build_request_json ──────────────────────────────────────────
+
+    fn parse(s: &str) -> Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn build_request_json_query_basic() {
+        let cli = base_cli(Cmd::Query {
+            sql: "SELECT 1".into(),
+            columnar: false,
+            with_meta: false,
+            limit: None,
+        });
+        let v = parse(&build_request_json(&cli).unwrap());
+        assert_eq!(v["cmd"], "query");
+        assert_eq!(v["sql"], "SELECT 1");
+        assert_eq!(v["columnar"], false);
+        assert_eq!(v["with_meta"], false);
+        assert!(v.as_object().unwrap().get("limit").is_none());
+    }
+
+    #[test]
+    fn build_request_json_query_with_limit_and_flags() {
+        let cli = base_cli(Cmd::Query {
+            sql: "SELECT * FROM t".into(),
+            columnar: true,
+            with_meta: true,
+            limit: Some(100),
+        });
+        let v = parse(&build_request_json(&cli).unwrap());
+        assert_eq!(v["columnar"], true);
+        assert_eq!(v["with_meta"], true);
+        assert_eq!(v["limit"], 100);
+    }
+
+    #[test]
+    fn build_request_json_execute() {
+        let cli = base_cli(Cmd::Execute {
+            sql: "CREATE TABLE t (x INT)".into(),
+        });
+        let v = parse(&build_request_json(&cli).unwrap());
+        assert_eq!(v["cmd"], "execute");
+        assert_eq!(v["sql"], "CREATE TABLE t (x INT)");
+    }
+
+    #[test]
+    fn build_request_json_dump_all_optional_fields() {
+        let cli = base_cli(Cmd::Dump {
+            table: "events".into(),
+            columns: Some("a,b,c".into()),
+            where_clause: Some("a > 0".into()),
+            order_by: Some("a DESC".into()),
+            limit: Some(50),
+        });
+        let v = parse(&build_request_json(&cli).unwrap());
+        assert_eq!(v["cmd"], "dump");
+        assert_eq!(v["table"], "events");
+        assert_eq!(v["columns"], "a,b,c");
+        // SQL keyword `where` is reserved; serialized field name is "where".
+        assert_eq!(v["where"], "a > 0");
+        assert_eq!(v["order_by"], "a DESC");
+        assert_eq!(v["limit"], 50);
+    }
+
+    #[test]
+    fn build_request_json_dump_omits_unset_optionals() {
+        let cli = base_cli(Cmd::Dump {
+            table: "t".into(),
+            columns: None,
+            where_clause: None,
+            order_by: None,
+            limit: None,
+        });
+        let v = parse(&build_request_json(&cli).unwrap());
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("columns"));
+        assert!(!obj.contains_key("where"));
+        assert!(!obj.contains_key("order_by"));
+        assert!(!obj.contains_key("limit"));
+    }
+
+    #[test]
+    fn build_request_json_tables_minimal() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Tables)).unwrap());
+        assert_eq!(v["cmd"], "tables");
+    }
+
+    #[test]
+    fn build_request_json_databases_minimal() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Databases)).unwrap());
+        assert_eq!(v["cmd"], "databases");
+    }
+
+    #[test]
+    fn build_request_json_schema_carries_table() {
+        let cli = base_cli(Cmd::Schema {
+            table: "users".into(),
+        });
+        let v = parse(&build_request_json(&cli).unwrap());
+        assert_eq!(v["cmd"], "schema");
+        assert_eq!(v["table"], "users");
+    }
+
+    #[test]
+    fn build_request_json_ping_minimal() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Ping)).unwrap());
+        assert_eq!(v["cmd"], "ping");
+    }
+
+    #[test]
+    fn build_request_json_database_propagates_to_envelope() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.database = Some("warehouse".into());
+        let v = parse(&build_request_json(&cli).unwrap());
+        assert_eq!(v["database"], "warehouse");
+        assert_eq!(v["cmd"], "ping");
+    }
+
+    #[test]
+    fn build_request_json_submit_errors() {
+        let cli = base_cli(Cmd::Submit {
+            script: PathBuf::from("/tmp/x.py"),
+            args: vec![],
+        });
+        let err = build_request_json(&cli).unwrap_err();
+        assert!(format!("{err}").contains("submit"));
+    }
+
+    // ─── locate_spark_submit (only the explicit-not-found and PATH-empty branches) ──
+
+    #[test]
+    fn locate_spark_submit_explicit_missing_errors() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.spark_submit = Some(PathBuf::from("/definitely/not/here/spark-submit"));
+        let err = locate_spark_submit(&cli).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("--spark-submit"));
+        assert!(msg.contains("not found"));
+    }
+
+    #[test]
+    fn locate_spark_submit_no_hints_no_path_errors() {
+        // Save / clear PATH so the function can't find spark-submit anywhere.
+        // SAFETY: env::set_var/remove_var requires unsafe in Rust 2024 edition;
+        // this crate is 2021, so still safe.
+        let saved = std::env::var("PATH").ok();
+        std::env::remove_var("PATH");
+        let cli = base_cli(Cmd::Ping);
+        let result = locate_spark_submit(&cli);
+        if let Some(p) = saved {
+            std::env::set_var("PATH", p);
+        }
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("spark-submit"));
+        assert!(msg.contains("not found"));
+    }
+
+    // ─── apply_common_args ───────────────────────────────────────────
+
+    fn collect_args(cli: &Cli) -> Vec<String> {
+        let mut cmd = Command::new("dummy");
+        apply_common_args(&mut cmd, cli);
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn apply_common_args_defaults() {
+        let cli = base_cli(Cmd::Ping);
+        let args = collect_args(&cli);
+        // Master defaults to local[*].
+        let pos = args.iter().position(|a| a == "--master").unwrap();
+        assert_eq!(args[pos + 1], "local[*]");
+        // App name.
+        let pos = args.iter().position(|a| a == "--name").unwrap();
+        assert_eq!(args[pos + 1], "stryke-spark");
+        // Default --conf spark.log.level=WARN.
+        assert!(args.windows(2).any(|w| w[0] == "--conf" && w[1] == "spark.log.level=WARN"));
+        // Default --conf spark.sql.catalogImplementation=in-memory.
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--conf" && w[1] == "spark.sql.catalogImplementation=in-memory"));
+    }
+
+    #[test]
+    fn apply_common_args_master_override() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.master = Some("yarn".into());
+        let args = collect_args(&cli);
+        let pos = args.iter().position(|a| a == "--master").unwrap();
+        assert_eq!(args[pos + 1], "yarn");
+    }
+
+    #[test]
+    fn apply_common_args_user_log_level_suppresses_default() {
+        // User-supplied spark.log.level= must not be overridden by the
+        // default WARN. Pin this so an accidental flip would surface.
+        let mut cli = base_cli(Cmd::Ping);
+        cli.conf.push("spark.log.level=DEBUG".into());
+        let args = collect_args(&cli);
+        let warn_count = args
+            .windows(2)
+            .filter(|w| w[0] == "--conf" && w[1].starts_with("spark.log.level="))
+            .count();
+        assert_eq!(warn_count, 1, "expected exactly 1 log.level conf, got {warn_count}: {args:?}");
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--conf" && w[1] == "spark.log.level=DEBUG"));
+    }
+
+    #[test]
+    fn apply_common_args_user_catalog_impl_suppresses_default() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.conf.push("spark.sql.catalogImplementation=hive".into());
+        let args = collect_args(&cli);
+        let count = args
+            .windows(2)
+            .filter(|w| w[0] == "--conf" && w[1].starts_with("spark.sql.catalogImplementation="))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn apply_common_args_deploy_mode_packages_jars_propagate() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.deploy_mode = Some("cluster".into());
+        cli.packages = Some("org.x:y:1.0".into());
+        cli.jars = Some("/tmp/a.jar,/tmp/b.jar".into());
+        let args = collect_args(&cli);
+        let pos = args.iter().position(|a| a == "--deploy-mode").unwrap();
+        assert_eq!(args[pos + 1], "cluster");
+        let pos = args.iter().position(|a| a == "--packages").unwrap();
+        assert_eq!(args[pos + 1], "org.x:y:1.0");
+        let pos = args.iter().position(|a| a == "--jars").unwrap();
+        assert_eq!(args[pos + 1], "/tmp/a.jar,/tmp/b.jar");
+    }
+
+    #[test]
+    fn apply_common_args_extra_confs_passed_through() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.conf.push("spark.executor.memory=4g".into());
+        cli.conf.push("spark.executor.cores=2".into());
+        let args = collect_args(&cli);
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--conf" && w[1] == "spark.executor.memory=4g"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--conf" && w[1] == "spark.executor.cores=2"));
+    }
+}
