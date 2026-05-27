@@ -980,4 +980,74 @@ mod tests {
         let pos = args.iter().position(|a| a == "--deploy-mode").unwrap();
         assert_eq!(args[pos + 1], "cluster");
     }
+
+    #[test]
+    fn build_request_json_query_columnar_true() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Query {
+            sql: "SELECT 1".into(),
+            columnar: true,
+            with_meta: false,
+            limit: None,
+        }))
+        .unwrap());
+        assert_eq!(v["columnar"], true);
+    }
+
+    #[test]
+    fn build_request_json_ping_no_table_key() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Ping)).unwrap());
+        assert!(!v.as_object().unwrap().contains_key("table"));
+    }
+
+    #[test]
+    fn apply_common_args_jars_flag() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.jars = Some("/x.jar".into());
+        assert!(collect_args(&cli).windows(2).any(|w| w[0] == "--jars"));
+    }
+
+    #[test]
+    fn build_request_json_dump_table_only() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
+            table: "events".into(),
+            columns: None,
+            where_clause: None,
+            order_by: None,
+            limit: None,
+        }))
+        .unwrap());
+        assert_eq!(v["table"], "events");
+    }
+
+    #[test]
+    fn build_request_json_valid_roundtrip() {
+        let s = build_request_json(&base_cli(Cmd::Tables)).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&s).unwrap()["cmd"], "tables");
+    }
+
+    #[test]
+    fn collect_args_packages_when_set() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.packages = Some("g:a:1".into());
+        assert!(collect_args(&cli).iter().any(|a| a == "--packages"));
+    }
+
+    #[test]
+    fn build_request_json_execute_sql_only_keys() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Execute {
+            sql: "TRUNCATE t".into(),
+        }))
+        .unwrap());
+        let keys: Vec<_> = v.as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["cmd", "sql"]);
+    }
+
+    #[test]
+    fn apply_common_args_custom_app_name_propagates() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.app_name = "job".into();
+        let args = collect_args(&cli);
+        let pos = args.iter().position(|a| a == "--name").unwrap();
+        assert_eq!(args[pos + 1], "job");
+    }
 }
