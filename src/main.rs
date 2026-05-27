@@ -1050,4 +1050,68 @@ mod tests {
         let pos = args.iter().position(|a| a == "--name").unwrap();
         assert_eq!(args[pos + 1], "job");
     }
+
+    #[test]
+    fn build_request_json_tables_cmd_only() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Tables)).unwrap());
+        assert_eq!(v["cmd"], "tables");
+    }
+
+    #[test]
+    fn collect_args_master_local_when_default() {
+        let args = collect_args(&base_cli(Cmd::Ping));
+        assert!(args.windows(2).any(|w| w[0] == "--master" && w[1] == "local[*]"));
+    }
+
+    #[test]
+    fn build_request_json_query_with_limit() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Query {
+            sql: "SELECT 1".into(),
+            columnar: false,
+            with_meta: false,
+            limit: Some(10),
+        }))
+        .unwrap());
+        assert_eq!(v["limit"], 10);
+    }
+
+    #[test]
+    fn apply_common_args_conf_flag_present() {
+        let args = collect_args(&base_cli(Cmd::Ping));
+        assert!(args.iter().any(|a| a == "--conf"));
+    }
+
+    #[test]
+    fn build_request_json_databases_minimal_keys() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Databases)).unwrap());
+        assert_eq!(v.as_object().unwrap().len(), 1);
+        assert_eq!(v["cmd"], "databases");
+    }
+
+    #[test]
+    fn collect_args_deploy_mode_when_client() {
+        let mut cli = base_cli(Cmd::Ping);
+        cli.deploy_mode = Some("client".into());
+        let args = collect_args(&cli);
+        assert!(args.windows(2).any(|w| w[0] == "--deploy-mode" && w[1] == "client"));
+    }
+
+    #[test]
+    fn build_request_json_dump_with_limit() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
+            table: "t".into(),
+            columns: None,
+            where_clause: None,
+            order_by: None,
+            limit: Some(5),
+        }))
+        .unwrap());
+        assert_eq!(v["limit"], 5);
+    }
+
+    #[test]
+    fn build_request_json_ping_cmd_value() {
+        let v = parse(&build_request_json(&base_cli(Cmd::Ping)).unwrap());
+        assert_eq!(v["cmd"], "ping");
+    }
 }
