@@ -97,9 +97,7 @@ enum Cmd {
         limit: Option<usize>,
     },
     /// Run a DDL / DML statement (CREATE TABLE, INSERT, etc.).
-    Execute {
-        sql: String,
-    },
+    Execute { sql: String },
     /// `SELECT * FROM TABLE [WHERE w] [ORDER BY o] [LIMIT n]` shorthand.
     Dump {
         #[arg(long, short = 't')]
@@ -552,7 +550,9 @@ mod tests {
         let pos = args.iter().position(|a| a == "--name").unwrap();
         assert_eq!(args[pos + 1], "stryke-spark");
         // Default --conf spark.log.level=WARN.
-        assert!(args.windows(2).any(|w| w[0] == "--conf" && w[1] == "spark.log.level=WARN"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--conf" && w[1] == "spark.log.level=WARN"));
         // Default --conf spark.sql.catalogImplementation=in-memory.
         assert!(args
             .windows(2)
@@ -579,7 +579,10 @@ mod tests {
             .windows(2)
             .filter(|w| w[0] == "--conf" && w[1].starts_with("spark.log.level="))
             .count();
-        assert_eq!(warn_count, 1, "expected exactly 1 log.level conf, got {warn_count}: {args:?}");
+        assert_eq!(
+            warn_count, 1,
+            "expected exactly 1 log.level conf, got {warn_count}: {args:?}"
+        );
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--conf" && w[1] == "spark.log.level=DEBUG"));
@@ -637,10 +640,12 @@ mod tests {
 
     #[test]
     fn build_request_json_execute_minimal() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Execute {
-            sql: "DROP TABLE t".into(),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Execute {
+                sql: "DROP TABLE t".into(),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["cmd"], "execute");
         assert_eq!(v["sql"], "DROP TABLE t");
     }
@@ -656,14 +661,16 @@ mod tests {
 
     #[test]
     fn build_request_json_dump_limit_only() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
-            table: "t".into(),
-            columns: None,
-            where_clause: None,
-            order_by: None,
-            limit: Some(1),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Dump {
+                table: "t".into(),
+                columns: None,
+                where_clause: None,
+                order_by: None,
+                limit: Some(1),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["limit"], 1);
         assert!(!v.as_object().unwrap().contains_key("columns"));
     }
@@ -708,14 +715,16 @@ mod tests {
 
     #[test]
     fn build_request_json_dump_where_only() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
-            table: "t".into(),
-            columns: None,
-            where_clause: Some("id > 0".into()),
-            order_by: None,
-            limit: None,
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Dump {
+                table: "t".into(),
+                columns: None,
+                where_clause: Some("id > 0".into()),
+                order_by: None,
+                limit: None,
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["where"], "id > 0");
         assert!(!v.as_object().unwrap().contains_key("order_by"));
     }
@@ -724,15 +733,14 @@ mod tests {
     fn apply_common_args_both_defaults_suppressed_when_set() {
         let mut cli = base_cli(Cmd::Ping);
         cli.conf.push("spark.log.level=ERROR".into());
-        cli.conf
-            .push("spark.sql.catalogImplementation=hive".into());
+        cli.conf.push("spark.sql.catalogImplementation=hive".into());
         let args = collect_args(&cli);
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--conf" && w[1] == "spark.log.level=ERROR"));
-        assert!(args.windows(2).any(|w| {
-            w[0] == "--conf" && w[1] == "spark.sql.catalogImplementation=hive"
-        }));
+        assert!(args
+            .windows(2)
+            .any(|w| { w[0] == "--conf" && w[1] == "spark.sql.catalogImplementation=hive" }));
         assert!(!args
             .windows(2)
             .any(|w| w[0] == "--conf" && w[1] == "spark.log.level=WARN"));
@@ -755,10 +763,12 @@ mod tests {
 
     #[test]
     fn build_request_json_schema_table_name() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Schema {
-            table: "db.tbl".into(),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Schema {
+                table: "db.tbl".into(),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["table"], "db.tbl");
     }
 
@@ -772,10 +782,12 @@ mod tests {
 
     #[test]
     fn build_request_json_execute_no_extra_keys() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Execute {
-            sql: "VACUUM".into(),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Execute {
+                sql: "VACUUM".into(),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["cmd"], "execute");
         assert!(!v.as_object().unwrap().contains_key("columnar"));
     }
@@ -785,18 +797,22 @@ mod tests {
         let mut cli = base_cli(Cmd::Ping);
         cli.packages = Some("org.apache.spark:pkg:1.0".into());
         let args = collect_args(&cli);
-        assert!(args.windows(2).any(|w| w[0] == "--packages" && w[1].contains("spark")));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--packages" && w[1].contains("spark")));
     }
 
     #[test]
     fn build_request_json_query_limit_zero() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Query {
-            sql: "SELECT 1".into(),
-            columnar: false,
-            with_meta: false,
-            limit: Some(0),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Query {
+                sql: "SELECT 1".into(),
+                columnar: false,
+                with_meta: false,
+                limit: Some(0),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["limit"], 0);
     }
 
@@ -824,14 +840,16 @@ mod tests {
 
     #[test]
     fn build_request_json_dump_columns_only() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
-            table: "t".into(),
-            columns: Some("a,b".into()),
-            where_clause: None,
-            order_by: None,
-            limit: None,
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Dump {
+                table: "t".into(),
+                columns: Some("a,b".into()),
+                where_clause: None,
+                order_by: None,
+                limit: None,
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["columns"], "a,b");
     }
 
@@ -852,25 +870,29 @@ mod tests {
 
     #[test]
     fn build_request_json_query_with_meta_flag() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Query {
-            sql: "SELECT 1".into(),
-            columnar: false,
-            with_meta: true,
-            limit: None,
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Query {
+                sql: "SELECT 1".into(),
+                columnar: false,
+                with_meta: true,
+                limit: None,
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["with_meta"], true);
     }
 
     #[test]
     fn build_request_json_query_columnar_flag() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Query {
-            sql: "SELECT 1".into(),
-            columnar: true,
-            with_meta: false,
-            limit: None,
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Query {
+                sql: "SELECT 1".into(),
+                columnar: true,
+                with_meta: false,
+                limit: None,
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["columnar"], true);
     }
 
@@ -882,14 +904,16 @@ mod tests {
 
     #[test]
     fn build_request_json_dump_order_by_only() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
-            table: "t".into(),
-            columns: None,
-            where_clause: None,
-            order_by: Some("id DESC".into()),
-            limit: None,
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Dump {
+                table: "t".into(),
+                columns: None,
+                where_clause: None,
+                order_by: Some("id DESC".into()),
+                limit: None,
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["order_by"], "id DESC");
     }
 
@@ -897,7 +921,9 @@ mod tests {
     fn apply_common_args_empty_conf_still_has_defaults() {
         let cli = base_cli(Cmd::Ping);
         let args = collect_args(&cli);
-        assert!(args.windows(2).any(|w| w[0] == "--conf" && w[1] == "spark.log.level=WARN"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--conf" && w[1] == "spark.log.level=WARN"));
     }
 
     #[test]
@@ -909,10 +935,12 @@ mod tests {
 
     #[test]
     fn build_request_json_execute_sql_unicode() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Execute {
-            sql: "SELECT '日本語'".into(),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Execute {
+                sql: "SELECT '日本語'".into(),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["sql"], "SELECT '日本語'");
     }
 
@@ -925,10 +953,7 @@ mod tests {
 
     #[test]
     fn build_request_json_schema_cmd() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Schema {
-            table: "t".into(),
-        }))
-        .unwrap());
+        let v = parse(&build_request_json(&base_cli(Cmd::Schema { table: "t".into() })).unwrap());
         assert_eq!(v["cmd"], "schema");
         assert_eq!(v["table"], "t");
     }
@@ -942,18 +967,22 @@ mod tests {
     #[test]
     fn apply_common_args_name_flag() {
         let args = collect_args(&base_cli(Cmd::Ping));
-        assert!(args.windows(2).any(|w| w[0] == "--name" && w[1] == "stryke-spark"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--name" && w[1] == "stryke-spark"));
     }
 
     #[test]
     fn build_request_json_query_limit_some() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Query {
-            sql: "SELECT 1".into(),
-            columnar: false,
-            with_meta: false,
-            limit: Some(100),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Query {
+                sql: "SELECT 1".into(),
+                columnar: false,
+                with_meta: false,
+                limit: Some(100),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["limit"], 100);
     }
 
@@ -965,10 +994,12 @@ mod tests {
 
     #[test]
     fn build_request_json_execute_no_limit_key() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Execute {
-            sql: "DELETE FROM t".into(),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Execute {
+                sql: "DELETE FROM t".into(),
+            }))
+            .unwrap(),
+        );
         assert!(!v.as_object().unwrap().contains_key("limit"));
     }
 
@@ -983,13 +1014,15 @@ mod tests {
 
     #[test]
     fn build_request_json_query_columnar_true() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Query {
-            sql: "SELECT 1".into(),
-            columnar: true,
-            with_meta: false,
-            limit: None,
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Query {
+                sql: "SELECT 1".into(),
+                columnar: true,
+                with_meta: false,
+                limit: None,
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["columnar"], true);
     }
 
@@ -1008,21 +1041,26 @@ mod tests {
 
     #[test]
     fn build_request_json_dump_table_only() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
-            table: "events".into(),
-            columns: None,
-            where_clause: None,
-            order_by: None,
-            limit: None,
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Dump {
+                table: "events".into(),
+                columns: None,
+                where_clause: None,
+                order_by: None,
+                limit: None,
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["table"], "events");
     }
 
     #[test]
     fn build_request_json_valid_roundtrip() {
         let s = build_request_json(&base_cli(Cmd::Tables)).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&s).unwrap()["cmd"], "tables");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&s).unwrap()["cmd"],
+            "tables"
+        );
     }
 
     #[test]
@@ -1034,10 +1072,12 @@ mod tests {
 
     #[test]
     fn build_request_json_execute_sql_only_keys() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Execute {
-            sql: "TRUNCATE t".into(),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Execute {
+                sql: "TRUNCATE t".into(),
+            }))
+            .unwrap(),
+        );
         let keys: Vec<_> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, vec!["cmd", "sql"]);
     }
@@ -1060,18 +1100,22 @@ mod tests {
     #[test]
     fn collect_args_master_local_when_default() {
         let args = collect_args(&base_cli(Cmd::Ping));
-        assert!(args.windows(2).any(|w| w[0] == "--master" && w[1] == "local[*]"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--master" && w[1] == "local[*]"));
     }
 
     #[test]
     fn build_request_json_query_with_limit() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Query {
-            sql: "SELECT 1".into(),
-            columnar: false,
-            with_meta: false,
-            limit: Some(10),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Query {
+                sql: "SELECT 1".into(),
+                columnar: false,
+                with_meta: false,
+                limit: Some(10),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["limit"], 10);
     }
 
@@ -1093,19 +1137,23 @@ mod tests {
         let mut cli = base_cli(Cmd::Ping);
         cli.deploy_mode = Some("client".into());
         let args = collect_args(&cli);
-        assert!(args.windows(2).any(|w| w[0] == "--deploy-mode" && w[1] == "client"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--deploy-mode" && w[1] == "client"));
     }
 
     #[test]
     fn build_request_json_dump_with_limit() {
-        let v = parse(&build_request_json(&base_cli(Cmd::Dump {
-            table: "t".into(),
-            columns: None,
-            where_clause: None,
-            order_by: None,
-            limit: Some(5),
-        }))
-        .unwrap());
+        let v = parse(
+            &build_request_json(&base_cli(Cmd::Dump {
+                table: "t".into(),
+                columns: None,
+                where_clause: None,
+                order_by: None,
+                limit: Some(5),
+            }))
+            .unwrap(),
+        );
         assert_eq!(v["limit"], 5);
     }
 
