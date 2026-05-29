@@ -202,7 +202,7 @@ for `.py` / `.jar` workloads.
 ```stryke
 Spark::helper_path()   → $abs_path
 Spark::ensure_built()  → $abs_path
-Spark::version()       → "stryke-spark-helper 0.1.0"
+Spark::version()       → "stryke-spark-helper 0.1.1"
 ```
 
 ## [0x05] Helper protocol
