@@ -1239,4 +1239,104 @@ mod tests {
         assert!(v.get("order_by").is_none());
         assert!(v.get("limit").is_none());
     }
+
+    // ─── clap parsing — Cli top-level + Cmd routing ─────────────────────
+    // Pin the CLI surface: subcommand routing, required positionals,
+    // submit's trailing-arg passthrough. Drift here would silently change
+    // which SQL or which spark-submit invocation is dispatched.
+    //
+    // Cli has no Debug derive — wrap parses through helpers.
+
+    fn parse_cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["stryke-spark-helper"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    fn assert_missing_required(res: Result<Cli, clap::Error>) {
+        match res {
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument),
+            Ok(_) => panic!("expected MissingRequiredArgument, got Ok"),
+        }
+    }
+
+    fn unwrap_cli(res: Result<Cli, clap::Error>) -> Cli {
+        match res {
+            Ok(c) => c,
+            Err(e) => panic!("expected parse Ok, got Err: {e}"),
+        }
+    }
+
+    #[test]
+    fn cli_ping_unit_variant() {
+        let cli = unwrap_cli(parse_cli(&["ping"]));
+        assert!(matches!(cli.cmd, Cmd::Ping));
+    }
+
+    #[test]
+    fn cli_query_requires_sql_positional() {
+        assert_missing_required(parse_cli(&["query"]));
+    }
+
+    #[test]
+    fn cli_query_columnar_and_with_meta_default_false() {
+        // Pin: NDJSON streaming is the default output mode.
+        let cli = unwrap_cli(parse_cli(&["query", "SELECT 1"]));
+        match &cli.cmd {
+            Cmd::Query {
+                columnar,
+                with_meta,
+                ..
+            } => {
+                assert!(!columnar);
+                assert!(!with_meta);
+            }
+            _ => panic!("expected Query"),
+        }
+    }
+
+    #[test]
+    fn cli_dump_table_flag_required() {
+        assert_missing_required(parse_cli(&["dump"]));
+    }
+
+    #[test]
+    fn cli_submit_requires_script_positional() {
+        // Bare `submit` has nothing to forward to spark-submit.
+        assert_missing_required(parse_cli(&["submit"]));
+    }
+
+    #[test]
+    fn cli_submit_trailing_args_collect_with_hyphens_preserved() {
+        // Pin: `trailing_var_arg = true, allow_hyphen_values = true`
+        // — every token after the script (including -X / --foo)
+        // must land in `args` verbatim, not be reinterpreted as flags.
+        let cli = unwrap_cli(parse_cli(&[
+            "submit",
+            "/tmp/job.py",
+            "--input",
+            "s3://bucket/in",
+            "-v",
+            "42",
+        ]));
+        match &cli.cmd {
+            Cmd::Submit { args, .. } => {
+                assert_eq!(
+                    args,
+                    &vec![
+                        "--input".to_string(),
+                        "s3://bucket/in".to_string(),
+                        "-v".to_string(),
+                        "42".to_string(),
+                    ]
+                );
+            }
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    #[test]
+    fn cli_schema_requires_table_flag() {
+        assert_missing_required(parse_cli(&["schema"]));
+    }
 }
