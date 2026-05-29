@@ -1162,4 +1162,81 @@ mod tests {
         let v = parse(&build_request_json(&base_cli(Cmd::Ping)).unwrap());
         assert_eq!(v["cmd"], "ping");
     }
+
+    // ─── build_request_json cmd-discriminator coverage ───────────────
+    //
+    // The Python driver dispatches purely on the `cmd` field — any
+    // typo or rename here silently routes a request to the wrong
+    // handler (e.g. an `Execute` request landing in the `Query`
+    // branch). Pin every variant's discriminator string so refactors
+    // surface here, not in production.
+
+    #[test]
+    fn build_request_json_every_cmd_variant_has_distinct_discriminator() {
+        let mut seen: Vec<String> = Vec::new();
+        for (cmd, expected) in [
+            (
+                Cmd::Query {
+                    sql: "select 1".into(),
+                    columnar: false,
+                    with_meta: false,
+                    limit: None,
+                },
+                "query",
+            ),
+            (
+                Cmd::Execute {
+                    sql: "select 1".into(),
+                },
+                "execute",
+            ),
+            (
+                Cmd::Dump {
+                    table: "t".into(),
+                    columns: None,
+                    where_clause: None,
+                    order_by: None,
+                    limit: None,
+                },
+                "dump",
+            ),
+            (Cmd::Tables, "tables"),
+            (Cmd::Databases, "databases"),
+            (Cmd::Schema { table: "t".into() }, "schema"),
+            (Cmd::Ping, "ping"),
+        ] {
+            let v = parse(&build_request_json(&base_cli(cmd)).unwrap());
+            let got = v["cmd"].as_str().unwrap().to_string();
+            assert_eq!(got, expected, "wrong discriminator for variant");
+            assert!(
+                !seen.contains(&got),
+                "duplicate discriminator `{got}` — variant aliasing leaks routing"
+            );
+            seen.push(got);
+        }
+    }
+
+    #[test]
+    fn build_request_json_dump_carries_table_and_omits_none_optionals() {
+        let cli = base_cli(Cmd::Dump {
+            table: "events".into(),
+            columns: None,
+            where_clause: None,
+            order_by: None,
+            limit: None,
+        });
+        let v = parse(&build_request_json(&cli).unwrap());
+        assert_eq!(v["cmd"], "dump");
+        assert_eq!(v["table"], "events");
+        // Optional fields must not show up as JSON null — they need
+        // to be omitted entirely so the Python side's `.get(...)`
+        // returns its own default rather than seeing `None`.
+        assert!(
+            v.get("columns").is_none(),
+            "columns must be omitted when unset, not serialized as null"
+        );
+        assert!(v.get("where").is_none());
+        assert!(v.get("order_by").is_none());
+        assert!(v.get("limit").is_none());
+    }
 }
