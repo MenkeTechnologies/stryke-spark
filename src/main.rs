@@ -1339,4 +1339,120 @@ mod tests {
     fn cli_schema_requires_table_flag() {
         assert_missing_required(parse_cli(&["schema"]));
     }
+
+    // ─── clap parsing — global Cli flags + additional Cmd surfaces ─────
+    // Previous round pinned ping/query-sql/columnar/dump/submit/schema/
+    // submit-trailing-args. These pin: (a) every global flag defaults
+    // unset/None (master/spark_home/spark_submit/packages/jars/deploy_mode
+    // /database/conf empty); (b) app_name default "stryke-spark" (visible
+    // in Spark UI); (c) Execute requires sql; (d) Tables/Databases unit
+    // variants; (e) --conf repeatable accumulation; (f) Dump optional
+    // selectors thread through.
+
+    #[test]
+    fn cli_global_flags_default_unset_except_app_name() {
+        // Pin: bare `ping` populates Cli with all None/empty defaults
+        // EXCEPT app_name which has a stable "stryke-spark" default.
+        // Drift in app_name would change Spark UI labels for every job;
+        // drift in master/etc. would silently route to a hardcoded
+        // cluster.
+        let cli = unwrap_cli(parse_cli(&["ping"]));
+        assert!(cli.master.is_none());
+        assert!(cli.spark_home.is_none());
+        assert!(cli.spark_submit.is_none());
+        assert!(cli.packages.is_none());
+        assert!(cli.jars.is_none());
+        assert!(cli.deploy_mode.is_none());
+        assert!(cli.database.is_none());
+        assert!(cli.conf.is_empty(), "no --conf = no overrides");
+        assert_eq!(cli.app_name, "stryke-spark");
+    }
+
+    #[test]
+    fn cli_conf_flag_repeatable_collects_into_vec() {
+        // Pin: --conf k=v / -c k=v repeatable. Drift to last-wins would
+        // silently drop all but the final spark config override.
+        let cli = unwrap_cli(parse_cli(&[
+            "-c",
+            "spark.executor.memory=4g",
+            "--conf",
+            "spark.driver.memory=2g",
+            "--conf",
+            "spark.sql.shuffle.partitions=200",
+            "ping",
+        ]));
+        assert_eq!(
+            cli.conf,
+            vec![
+                "spark.executor.memory=4g",
+                "spark.driver.memory=2g",
+                "spark.sql.shuffle.partitions=200",
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_execute_requires_sql_positional() {
+        // Pin: Execute mirrors Query's sql-required contract for DDL/DML.
+        // Without sql there's nothing to forward to the Spark session.
+        assert_missing_required(parse_cli(&["execute"]));
+        let cli = unwrap_cli(parse_cli(&["execute", "CREATE TABLE x AS SELECT 1"]));
+        match cli.cmd {
+            Cmd::Execute { sql } => assert_eq!(sql, "CREATE TABLE x AS SELECT 1"),
+            _ => panic!("expected Execute"),
+        }
+    }
+
+    #[test]
+    fn cli_tables_and_databases_are_unit_variants() {
+        // Pin: both list-style commands take no positionals/flags. Drift
+        // to required-arg would break the `qx spark tables` shell glue.
+        assert!(matches!(
+            unwrap_cli(parse_cli(&["tables"])).cmd,
+            Cmd::Tables
+        ));
+        assert!(matches!(
+            unwrap_cli(parse_cli(&["databases"])).cmd,
+            Cmd::Databases
+        ));
+    }
+
+    #[test]
+    fn cli_dump_optional_selectors_thread_through_and_master_global_routes() {
+        // Pin: Dump's --columns/--where/--order-by/--limit all bind to
+        // their matched fields. Also pin that --master is a global flag
+        // accepting placement before the subcommand.
+        let cli = unwrap_cli(parse_cli(&[
+            "--master",
+            "local[*]",
+            "dump",
+            "--table",
+            "events",
+            "--columns",
+            "id,ts",
+            "--where",
+            "ts > 0",
+            "--order-by",
+            "ts",
+            "--limit",
+            "500",
+        ]));
+        assert_eq!(cli.master.as_deref(), Some("local[*]"));
+        match cli.cmd {
+            Cmd::Dump {
+                table,
+                columns,
+                where_clause,
+                order_by,
+                limit,
+            } => {
+                assert_eq!(table, "events");
+                assert_eq!(columns.as_deref(), Some("id,ts"));
+                assert_eq!(where_clause.as_deref(), Some("ts > 0"));
+                assert_eq!(order_by.as_deref(), Some("ts"));
+                assert_eq!(limit, Some(500));
+            }
+            _ => panic!("expected Dump"),
+        }
+    }
 }
