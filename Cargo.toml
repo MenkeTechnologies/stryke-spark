@@ -2,7 +2,7 @@
 name = "stryke-spark-helper"
 version = "0.1.1"
 edition = "2021"
-description = "Apache Spark bridge binary for the stryke `spark` package."
+description = "Apache Spark bridge binary for the stryke `spark` package"
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-spark"
