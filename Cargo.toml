@@ -6,6 +6,7 @@ description = "Apache Spark bridge binary for the stryke `spark` package."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-spark"
+homepage = "https://menketechnologies.github.io/stryke-spark/"
 publish = false
 
 [[bin]]
