@@ -313,11 +313,10 @@ stryke-spark/
     driver.py                    # embedded PySpark driver
   lib/
     Spark.stk                    # `use Spark`
-  bin/
-    spark.stk                    # `spark` CLI
-    spark-build.stk
   t/
-    test_spark.stk               # 6-test end-to-end (skips without spark-submit)
+    test_spark.stk               # live end-to-end suite (skips without spark-submit)
+  tests/
+    contract_cli_round4.rs       # Rust contract tests
   examples/
     quick_query.stk
     range_stats.stk
