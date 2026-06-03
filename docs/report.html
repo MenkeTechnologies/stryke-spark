@@ -110,7 +110,7 @@
         <thead><tr><th>Layer</th><th>Implementation</th></tr></thead>
         <tbody>
           <tr><td>stryke library (<code>lib/*.stk</code>)</td><td>Thin wrapper exposing typed functions; serializes args to NDJSON, deserializes responses</td></tr>
-          <tr><td>Helper binary (<code>stryke-spark-helper</code>)</td><td>Rust async (tokio); reads NDJSON from stdin, dispatches, writes NDJSON to stdout</td></tr>
+          <tr><td>Helper binary (<code>stryke-spark-helper</code>)</td><td>Rust sync; reads NDJSON from stdin, dispatches, writes NDJSON to stdout</td></tr>
           <tr><td>Process model</td><td>One helper subprocess per stryke session; lives as long as the stryke runtime needs it</td></tr>
           <tr><td>Build</td><td>Cargo with <code>publish = false</code> on the helper crate; the package itself ships via <code>s pkg install -g .</code></td></tr>
           <tr><td>Install path</td><td><code>~/.stryke/bin/spark</code> after <code>make install</code>; PATH-resolvable from any shell</td></tr>
