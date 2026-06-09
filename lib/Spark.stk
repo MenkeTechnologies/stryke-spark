@@ -1,15 +1,15 @@
-# lib/Spark.stk — Apache Spark client for stryke (`use Spark`).
-#
-# Thin wrapper around the `stryke-spark` cdylib's `spark__*` exports.
-# The cdylib is dlopened in-process on first `use Spark` (see stryke's
-# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
-# stryke-callable function via `rust_ffi::load_cdylib`.
-#
-# Replaces the v1 helper-binary model (fork(2) + exec(2) per call). The
-# cdylib still spawns spark-submit per call — persistent SparkSession is
-# deferred (needs a long-running JVM daemon design that's larger than the
-# v0.2.0 helper-binary → cdylib refactor). What the cdylib model does
-# eliminate is the helper-binary fork+exec on top of spark-submit.
+## lib/Spark.stk — Apache Spark client for stryke (`use Spark`).
+##
+## Thin wrapper around the `stryke-spark` cdylib's `spark__*` exports.
+## The cdylib is dlopened in-process on first `use Spark` (see stryke's
+## `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+## stryke-callable function via `rust_ffi::load_cdylib`.
+##
+## Replaces the v1 helper-binary model (fork(2) + exec(2) per call). The
+## cdylib still spawns spark-submit per call — persistent SparkSession is
+## deferred (needs a long-running JVM daemon design that's larger than the
+## v0.2.0 helper-binary → cdylib refactor). What the cdylib model does
+## eliminate is the helper-binary fork+exec on top of spark-submit.
 
 package Spark
 
@@ -75,7 +75,7 @@ fn Spark::query_scalar ($sql, %opts) {
     $r[0]->{$keys[0]}
 }
 
-# Callback fires per row. The cdylib returns all rows in one call.
+## Callback fires per row. The cdylib returns all rows in one call.
 fn Spark::query_stream ($sql, %opts) {
     die "Spark::query_stream: callback => sub { … } required" unless defined $opts{callback}
     my $cb = $opts{callback}
