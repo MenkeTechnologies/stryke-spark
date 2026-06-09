@@ -5,9 +5,9 @@
 
 use Spark
 
-my $n = $ARGV[0] // 10_000_000
+val $n = $ARGV[0] // 10_000_000
 
-my $r = Spark::query_one "
+val $r = Spark::query_one "
     SELECT
         COUNT(*) AS rows,
         SUM(id) AS total,

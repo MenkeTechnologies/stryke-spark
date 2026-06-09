@@ -7,8 +7,8 @@
 
 use Spark
 
-my $have_cdylib = eval { Spark::version(); 1 }
-my $have_submit = system("command -v spark-submit >/dev/null 2>&1") == 0
+val $have_cdylib = eval { Spark::version(); 1 }
+val $have_submit = system("command -v spark-submit >/dev/null 2>&1") == 0
 
 unless ($have_cdylib) {
     p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
@@ -20,16 +20,16 @@ unless ($have_submit) {
 }
 
 p "1..6"
-my $i = 0
+var $i = 0
 
 # 1. Ping
-my $ok
+var $ok
 eval { $ok = Spark::ping() }
 $i++
 p $@ ? "not ok $i - ping: $@" : ($ok ? "ok $i - ping" : "not ok $i - ping returned false")
 
 # 2. Plain SELECT.
-my @rows
+var @rows
 eval { @rows = Spark::query("SELECT 1 + 1 AS two, 'hi' AS s") }
 $i++
 p $@ ? "not ok $i - simple query: $@" :
@@ -46,14 +46,14 @@ p $@ ? "not ok $i - range: $@" :
             : "not ok $i - range wrong shape (got " . len(@rows) . ")")
 
 # 4. Scalar shortcut.
-my $n
+var $n
 eval { $n = Spark::query_scalar("SELECT COUNT(*) AS n FROM range(10)") }
 $i++
 p $@ ? "not ok $i - query_scalar: $@" :
        ($n == 10 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $n")
 
 # 5. Columnar.
-my $cw
+var $cw
 eval { $cw = Spark::query("SELECT id FROM range(3)", columnar => 1) }
 $i++
 p $@ ? "not ok $i - columnar: $@" :
@@ -62,14 +62,14 @@ p $@ ? "not ok $i - columnar: $@" :
             : "not ok $i - columnar bad shape")
 
 # 6. Databases (at least `default`).
-my @dbs
+var @dbs
 eval { @dbs = Spark::databases() }
 $i++
 if ($@) {
     p "not ok $i - databases: $@"
 } else {
-    my $found_default = 0
-    for my $d (@dbs) {
+    var $found_default = 0
+    for val $d (@dbs) {
         $found_default = 1 if $d eq "default"
     }
     p ($found_default ? "ok $i - databases (saw default)" :

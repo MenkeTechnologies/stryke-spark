@@ -8,34 +8,34 @@
 
 use Spark
 
-my $tmp = "/tmp/stryke-spark-demo-$$"
-my $path = "$tmp/orders.parquet"
+val $tmp = "/tmp/stryke-spark-demo-$$"
+val $path = "$tmp/orders.parquet"
 mkdir $tmp unless -d $tmp
 
-my $have_arrow = eval { require "Arrow.stk"; 1 }
+val $have_arrow = eval { require "Arrow.stk"; 1 }
 unless ($have_arrow) {
     p "Set up: install stryke-arrow, then rerun this example."
     p "We'll just SELECT directly from a Spark range() instead."
-    my @rows = Spark::query "SELECT id, id * 100 AS amount FROM range(5)"
+    val @rows = Spark::query "SELECT id, id * 100 AS amount FROM range(5)"
     p to_json $_ for @rows
     exit 0
 }
 
 # Write a sample parquet file via arrow.
-my @orders = map {
+val @orders = map {
     { order_id => $_, customer => "cust_" . ($_ % 3), amount => $_ * 13.7 }
 } (1:200)
 Arrow::write($path, \@orders, format => "parquet", compression => "zstd")
 
 # Spark reads it back. read_files() works for any path Spark can resolve.
-my @summary = Spark::query "
+val @summary = Spark::query "
     SELECT customer, COUNT(*) AS orders, SUM(amount) AS revenue
     FROM read_files('$path', format => 'parquet')
     GROUP BY customer
     ORDER BY revenue DESC
 "
 p "customer revenue summary:"
-for my $r (@summary) {
+for val $r (@summary) {
     p "  $r->{customer}: $r->{orders} orders, $r->{revenue}"
 }
 

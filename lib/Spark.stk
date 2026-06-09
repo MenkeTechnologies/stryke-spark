@@ -17,7 +17,7 @@ package Spark
 
 ## Decode the cdylib's JSON return; die on `{error}` payload.
 fn Spark::_decode ($name, $json) {
-    my $o = from_json $json
+    val $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
         die "Spark::$name: $o->{error}"
     }
@@ -26,8 +26,8 @@ fn Spark::_decode ($name, $json) {
 
 ## Build the FFI request hash by merging the caller's connection opts.
 fn Spark::_req ($extra, $opts) {
-    my %r = %$extra
-    for my $k (qw(master app_name deploy_mode packages jars confs database spark_submit spark_home)) {
+    var %r = %$extra
+    for val $k (qw(master app_name deploy_mode packages jars confs database spark_submit spark_home)) {
         $r{$k} = $opts->{$k} if exists $opts->{$k} && defined $opts->{$k}
     }
     \%r
@@ -54,43 +54,43 @@ fn Spark::query ($sql, %opts) {
 
 ## Internal query implementation; see public wrappers.
 fn Spark::_query_impl ($sql, $o) {
-    my $r = Spark::_req({ sql => $sql, limit => $o->{limit} }, $o)
-    my $res = Spark::_decode("query", spark__query(to_json($r)))
+    val $r = Spark::_req({ sql => $sql, limit => $o->{limit} }, $o)
+    val $res = Spark::_decode("query", spark__query(to_json($r)))
     @{ $res->{rows} }
 }
 
 ## Spark SQL SELECT LIMIT 1; one row or undef.
 fn Spark::query_one ($sql, %opts) {
     $opts{limit} = 1
-    my @r = Spark::_query_impl($sql, \%opts)
+    val @r = Spark::_query_impl($sql, \%opts)
     @r ? $r[0] : undef
 }
 
 ## Spark SQL SELECT; first column as a flat list.
 fn Spark::query_col ($sql, %opts) {
-    my @rows = Spark::_query_impl($sql, \%opts)
+    val @rows = Spark::_query_impl($sql, \%opts)
     return () unless @rows
-    my @keys = keys %{ $rows[0] }
-    my $first = $keys[0]
+    val @keys = keys %{ $rows[0] }
+    val $first = $keys[0]
     map { $_->{$first} } @rows
 }
 
 ## Spark SQL SELECT LIMIT 1; first cell.
 fn Spark::query_scalar ($sql, %opts) {
     $opts{limit} = 1
-    my @r = Spark::_query_impl($sql, \%opts)
+    val @r = Spark::_query_impl($sql, \%opts)
     return undef unless @r
-    my @keys = keys %{ $r[0] }
+    val @keys = keys %{ $r[0] }
     $r[0]->{$keys[0]}
 }
 
 ## Callback fires per row. The cdylib returns all rows in one call.
 fn Spark::query_stream ($sql, %opts) {
     die "Spark::query_stream: callback => sub { … } required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @rows = Spark::_query_impl($sql, \%opts)
-    my $n = 0
-    for my $row (@rows) {
+    val $cb = $opts{callback}
+    val @rows = Spark::_query_impl($sql, \%opts)
+    var $n = 0
+    for val $row (@rows) {
         $cb->($row)
         $n++
     }
@@ -99,12 +99,12 @@ fn Spark::query_stream ($sql, %opts) {
 
 ## SELECT * FROM $table shorthand with optional filters.
 fn Spark::dump ($table, %opts) {
-    my $r = Spark::_req(
+    val $r = Spark::_req(
         { table => $table, columns => $opts{columns}, where => $opts{where},
           order_by => $opts{order_by}, limit => $opts{limit} },
         \%opts
     )
-    my $res = Spark::_decode("dump", spark__dump(to_json($r)))
+    val $res = Spark::_decode("dump", spark__dump(to_json($r)))
     @{ $res->{rows} }
 }
 
@@ -112,7 +112,7 @@ fn Spark::dump ($table, %opts) {
 
 ## Run a SparkSQL DDL/DML statement.
 fn Spark::execute ($sql, %opts) {
-    my $r = Spark::_req({ sql => $sql }, \%opts)
+    val $r = Spark::_req({ sql => $sql }, \%opts)
     Spark::_decode("execute", spark__execute(to_json($r)))
 }
 
@@ -120,20 +120,20 @@ fn Spark::execute ($sql, %opts) {
 
 ## List tables in the current Spark catalog.
 fn Spark::tables (%opts) {
-    my $o = Spark::_decode("tables", spark__tables(to_json(Spark::_req({}, \%opts))))
+    val $o = Spark::_decode("tables", spark__tables(to_json(Spark::_req({}, \%opts))))
     @{ $o->{rows} }
 }
 
 ## List Spark catalogs / databases.
 fn Spark::databases (%opts) {
-    my $o = Spark::_decode("databases", spark__databases(to_json(Spark::_req({}, \%opts))))
+    val $o = Spark::_decode("databases", spark__databases(to_json(Spark::_req({}, \%opts))))
     @{ $o->{rows} }
 }
 
 ## DESCRIBE TABLE $table — column rows.
 fn Spark::schema ($table, %opts) {
-    my $r = Spark::_req({ table => $table }, \%opts)
-    my $res = Spark::_decode("schema", spark__schema(to_json($r)))
+    val $r = Spark::_req({ table => $table }, \%opts)
+    val $res = Spark::_decode("schema", spark__schema(to_json($r)))
     @{ $res->{rows} }
 }
 
@@ -141,8 +141,8 @@ fn Spark::schema ($table, %opts) {
 
 ## Pass-through spark-submit run; returns { exit_code, output }.
 fn Spark::submit ($script, %opts) {
-    my $args = $opts{args} // []
-    my $r = Spark::_req({ script => $script, args => $args }, \%opts)
+    val $args = $opts{args} // []
+    val $r = Spark::_req({ script => $script, args => $args }, \%opts)
     Spark::_decode("submit", spark__submit(to_json($r)))
 }
 

@@ -6,7 +6,7 @@
 
 use Spark
 
-my @rows = Spark::query "
+val @rows = Spark::query "
     WITH t AS (
         SELECT 'alice' AS name, 1.5 AS score UNION
         SELECT 'bob',           2.0          UNION
@@ -16,6 +16,6 @@ my @rows = Spark::query "
     FROM t
     ORDER BY score DESC
 "
-for my $r (@rows) {
+for val $r (@rows) {
     p "$r->{name}: $r->{score} (doubled = $r->{doubled})"
 }
