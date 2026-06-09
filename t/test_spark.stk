@@ -1,77 +1,48 @@
-# t/test_spark.stk — round-trip tests against a local Spark session.
-#
-# Each Spark::* call spins a fresh JVM (~5–10s), so the suite is
-# intentionally small. Requires the cdylib to be loaded — install once
-# with `s pkg install -g .` so stryke's FFI bridge dlopens
-# lib/libstryke_spark.{dylib,so} on `use Spark`.
+## t/test_spark.stk — assertion tests for the stryke `Spark` package.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`).
+## Requires the cdylib to be loaded — install once with `s pkg install -g .`
+## so stryke's FFI bridge dlopens `lib/libstryke_spark.{dylib,so}` on
+## `use Spark`. Live tests fire when `spark-submit` is on $PATH; each call
+## spins a fresh JVM (~5–10s) so the suite is intentionally small.
 
 use Spark
 
-val $have_cdylib = eval { Spark::version(); 1 }
+# ── permission-free: cdylib reachable ───────────────────────────────
+val $version = Spark::version()
+assert_ok $version, "Spark::version returns truthy (cdylib loaded)"
+
+# ── spark-submit availability ───────────────────────────────────────
 val $have_submit = system("command -v spark-submit >/dev/null 2>&1") == 0
 
-unless ($have_cdylib) {
-    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
-    exit 0
+if ($have_submit) {
+    # 1. ping
+    assert_ok Spark::ping(), "ping returns truthy"
+
+    # 2. plain SELECT
+    val @rows = Spark::query("SELECT 1 + 1 AS two, 'hi' AS s")
+    assert_eq scalar(@rows), 1, "simple query: 1 row"
+    assert_eq $rows[0]->{two}, 2, "simple query: 1+1=2"
+    assert_eq $rows[0]->{s}, "hi", "simple query: string col"
+
+    # 3. range() table-valued fn
+    val @range = Spark::query("SELECT id FROM range(5) ORDER BY id")
+    assert_eq scalar(@range), 5, "range(5): 5 rows"
+    assert_eq $range[4]->{id}, 4, "range(5): last row id=4"
+
+    # 4. query_scalar
+    assert_eq Spark::query_scalar("SELECT COUNT(*) AS n FROM range(10)"), 10, "query_scalar: count(range(10))=10"
+
+    # 5. columnar
+    val $cw = Spark::query("SELECT id FROM range(3)", columnar => 1)
+    assert_eq ref($cw), "HASH", "columnar: returns hash"
+    assert_eq $cw->{num_rows}, 3, "columnar: num_rows=3"
+    assert_eq scalar(@{$cw->{rows}}), 3, "columnar: rows array"
+
+    # 6. databases includes 'default'
+    val @dbs = Spark::databases()
+    val $found_default = grep { $_ eq "default" } @dbs
+    assert_ok $found_default, "databases: contains 'default'"
 }
-unless ($have_submit) {
-    p "1..0 # SKIP spark-submit not on PATH"
-    exit 0
-}
 
-p "1..6"
-var $i = 0
-
-# 1. Ping
-var $ok
-eval { $ok = Spark::ping() }
-$i++
-p $@ ? "not ok $i - ping: $@" : ($ok ? "ok $i - ping" : "not ok $i - ping returned false")
-
-# 2. Plain SELECT.
-var @rows
-eval { @rows = Spark::query("SELECT 1 + 1 AS two, 'hi' AS s") }
-$i++
-p $@ ? "not ok $i - simple query: $@" :
-       (len(@rows) == 1 && $rows[0]->{two} == 2 && $rows[0]->{s} eq "hi"
-            ? "ok $i - simple query"
-            : "not ok $i - simple query wrong: " . to_json(\@rows))
-
-# 3. range() table-valued fn.
-eval { @rows = Spark::query("SELECT id FROM range(5) ORDER BY id") }
-$i++
-p $@ ? "not ok $i - range: $@" :
-       (len(@rows) == 5 && $rows[4]->{id} == 4
-            ? "ok $i - range (5 rows)"
-            : "not ok $i - range wrong shape (got " . len(@rows) . ")")
-
-# 4. Scalar shortcut.
-var $n
-eval { $n = Spark::query_scalar("SELECT COUNT(*) AS n FROM range(10)") }
-$i++
-p $@ ? "not ok $i - query_scalar: $@" :
-       ($n == 10 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $n")
-
-# 5. Columnar.
-var $cw
-eval { $cw = Spark::query("SELECT id FROM range(3)", columnar => 1) }
-$i++
-p $@ ? "not ok $i - columnar: $@" :
-       (ref($cw) eq "HASH" && $cw->{num_rows} == 3 && len(@{$cw->{rows}}) == 3
-            ? "ok $i - columnar"
-            : "not ok $i - columnar bad shape")
-
-# 6. Databases (at least `default`).
-var @dbs
-eval { @dbs = Spark::databases() }
-$i++
-if ($@) {
-    p "not ok $i - databases: $@"
-} else {
-    var $found_default = 0
-    for val $d (@dbs) {
-        $found_default = 1 if $d eq "default"
-    }
-    p ($found_default ? "ok $i - databases (saw default)" :
-       "not ok $i - databases missing 'default' (got " . join(",", @dbs) . ")")
-}
+test_run

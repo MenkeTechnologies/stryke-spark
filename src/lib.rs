@@ -434,3 +434,192 @@ pub extern "C" fn spark__schema(args: *const c_char) -> *const c_char {
 pub extern "C" fn spark__submit(args: *const c_char) -> *const c_char {
     ffi_call(args, op_submit)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(f: F) {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = [
+            (
+                "STRYKE_SPARK_SUBMIT",
+                std::env::var("STRYKE_SPARK_SUBMIT").ok(),
+            ),
+            ("SPARK_HOME", std::env::var("SPARK_HOME").ok()),
+        ];
+        std::env::remove_var("STRYKE_SPARK_SUBMIT");
+        std::env::remove_var("SPARK_HOME");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, v) in &saved {
+            match v {
+                Some(s) => std::env::set_var(k, s),
+                None => std::env::remove_var(k),
+            }
+        }
+        if let Err(p) = result {
+            std::panic::resume_unwind(p);
+        }
+    }
+
+    // ── SparkOpts::from_value ──
+
+    #[test]
+    fn opts_defaults_all_none() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({}));
+            assert_eq!(o.master, None);
+            assert_eq!(o.app_name, None);
+            assert!(o.confs.is_empty());
+            assert_eq!(o.spark_submit, None);
+            assert_eq!(o.spark_home, None);
+        });
+    }
+
+    #[test]
+    fn opts_full_overrides_round_trip() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({
+                "master": "yarn",
+                "app_name": "demo",
+                "deploy_mode": "client",
+                "packages": "org.apache.iceberg:iceberg-spark:1.4.0",
+                "jars": "/lib/foo.jar",
+                "confs": ["spark.executor.memory=4g", "spark.cores.max=8"],
+                "database": "default",
+            }));
+            assert_eq!(o.master.as_deref(), Some("yarn"));
+            assert_eq!(o.app_name.as_deref(), Some("demo"));
+            assert_eq!(o.deploy_mode.as_deref(), Some("client"));
+            assert_eq!(
+                o.packages.as_deref(),
+                Some("org.apache.iceberg:iceberg-spark:1.4.0")
+            );
+            assert_eq!(o.jars.as_deref(), Some("/lib/foo.jar"));
+            assert_eq!(o.confs.len(), 2);
+            assert_eq!(o.database.as_deref(), Some("default"));
+        });
+    }
+
+    #[test]
+    fn opts_spark_submit_from_env_when_not_in_opts() {
+        with_env(|| {
+            std::env::set_var("STRYKE_SPARK_SUBMIT", "/from/env/spark-submit");
+            let o = SparkOpts::from_value(&json!({}));
+            assert_eq!(o.spark_submit.as_deref(), Some("/from/env/spark-submit"));
+        });
+    }
+
+    #[test]
+    fn opts_spark_submit_opts_wins_over_env() {
+        with_env(|| {
+            std::env::set_var("STRYKE_SPARK_SUBMIT", "/from/env");
+            let o = SparkOpts::from_value(&json!({"spark_submit": "/from/opts"}));
+            assert_eq!(o.spark_submit.as_deref(), Some("/from/opts"));
+        });
+    }
+
+    #[test]
+    fn opts_spark_home_from_env() {
+        with_env(|| {
+            std::env::set_var("SPARK_HOME", "/opt/spark");
+            let o = SparkOpts::from_value(&json!({}));
+            assert_eq!(o.spark_home.as_deref(), Some("/opt/spark"));
+        });
+    }
+
+    // ── locate_spark_submit ──
+
+    #[test]
+    fn locate_explicit_nonfile_errors() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({"spark_submit": "/does/not/exist"}));
+            let err = o.locate_spark_submit().unwrap_err().to_string();
+            assert!(err.contains("not a file"), "{err}");
+        });
+    }
+
+    #[test]
+    fn locate_no_env_no_opts_no_path_errors() {
+        with_env(|| {
+            std::env::set_var("PATH", "/no/spark/here");
+            let o = SparkOpts::from_value(&json!({}));
+            let err = o.locate_spark_submit().unwrap_err().to_string();
+            assert!(err.contains("spark-submit not found"), "{err}");
+        });
+    }
+
+    #[test]
+    fn locate_picks_explicit_when_file_exists() {
+        with_env(|| {
+            // Create a real temp file we know is_file() == true.
+            let f = tempfile::NamedTempFile::new().unwrap();
+            let p = f.path().to_path_buf();
+            let o = SparkOpts::from_value(&json!({"spark_submit": p.to_str().unwrap()}));
+            assert_eq!(o.locate_spark_submit().unwrap(), p);
+        });
+    }
+
+    // ── build_request ──
+
+    #[test]
+    fn build_request_no_database_passes_body_through() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({}));
+            let req = build_request(&o, json!({"cmd": "ping"}));
+            assert_eq!(req["cmd"], json!("ping"));
+            assert!(req.get("database").is_none());
+        });
+    }
+
+    #[test]
+    fn build_request_database_overrides_body() {
+        with_env(|| {
+            // Opts.database overrides whatever was in the body's database
+            // field — the option wins as the canonical setter.
+            let o = SparkOpts::from_value(&json!({"database": "shop"}));
+            let req = build_request(&o, json!({"cmd": "query", "database": "other"}));
+            assert_eq!(req["database"], json!("shop"));
+            assert_eq!(req["cmd"], json!("query"));
+        });
+    }
+
+    #[test]
+    fn build_request_non_object_body_yields_only_database() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({"database": "d"}));
+            let req = build_request(&o, json!(null));
+            assert_eq!(req["database"], json!("d"));
+        });
+    }
+
+    // ── ndjson_to_rows ──
+
+    #[test]
+    fn ndjson_multi_line() {
+        let buf = "{\"a\":1}\n{\"a\":2}\n";
+        let r = ndjson_to_rows(buf).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[1]["a"], json!(2));
+    }
+
+    #[test]
+    fn ndjson_skips_blank() {
+        let r = ndjson_to_rows("{\"a\":1}\n\n{\"a\":2}\n\n").unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn ndjson_empty_yields_empty() {
+        assert!(ndjson_to_rows("").unwrap().is_empty());
+        assert!(ndjson_to_rows("\n\n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn ndjson_invalid_line_errors() {
+        assert!(ndjson_to_rows("{\"a\":1}\ngarbage\n").is_err());
+    }
+}
