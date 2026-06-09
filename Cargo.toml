@@ -2,7 +2,7 @@
 name = "stryke-spark"
 version = "0.2.0"
 edition = "2021"
-description = "Apache Spark cdylib for stryke. Dlopened in-process. Spawns spark-submit + embedded PySpark driver per call (persistent SparkSession deferred — needs a long-running JVM daemon design)."
+description = "Apache Spark cdylib for the stryke `spark` package — dlopened in-process via stryke's FFI bridge."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-spark"
