@@ -146,4 +146,3 @@ fn Spark::submit ($script, %opts) {
     Spark::_decode("submit", spark__submit(to_json($r)))
 }
 
-1
