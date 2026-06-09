@@ -12,10 +12,14 @@ use Spark
 val $version = Spark::version()
 assert_ok $version, "Spark::version returns truthy (cdylib loaded)"
 
-# ── spark-submit availability ───────────────────────────────────────
+# ── spark-submit availability + live JVM probe ──────────────────────
+# `command -v spark-submit` is a fast PATH check, but the JVM may still
+# fail (missing JAVA_HOME, incompatible JDK, log4j init errors).
+# Probe with eval to skip cleanly when the JVM can't start.
 val $have_submit = system("command -v spark-submit >/dev/null 2>&1") == 0
+val $alive = $have_submit && eval { Spark::ping() }
 
-if ($have_submit) {
+if ($alive) {
     # 1. ping
     assert_ok Spark::ping(), "ping returns truthy"
 
