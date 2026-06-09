@@ -1,16 +1,17 @@
 # t/test_spark.stk — round-trip tests against a local Spark session.
 #
 # Each Spark::* call spins a fresh JVM (~5–10s), so the suite is
-# intentionally small. Skips cleanly when `spark-submit` isn't on PATH or
-# the helper isn't built.
+# intentionally small. Requires the cdylib to be loaded — install once
+# with `s pkg install -g .` so stryke's FFI bridge dlopens
+# lib/libstryke_spark.{dylib,so} on `use Spark`.
 
-require "./lib/Spark.stk"
+use Spark
 
-my $have_helper = eval { Spark::helper_path(); 1 }
+my $have_cdylib = eval { Spark::version(); 1 }
 my $have_submit = system("command -v spark-submit >/dev/null 2>&1") == 0
 
-unless ($have_helper) {
-    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+unless ($have_cdylib) {
+    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 unless ($have_submit) {

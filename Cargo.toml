@@ -1,26 +1,25 @@
 [package]
-name = "stryke-spark-helper"
-version = "0.1.1"
+name = "stryke-spark"
+version = "0.2.0"
 edition = "2021"
-description = "Apache Spark bridge binary for the stryke `spark` package"
+description = "Apache Spark cdylib for stryke. Dlopened in-process. Spawns spark-submit + embedded PySpark driver per call (persistent SparkSession deferred — needs a long-running JVM daemon design)."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-spark"
 homepage = "https://menketechnologies.github.io/stryke-spark/"
 publish = false
 
-[[bin]]
-name = "stryke-spark-helper"
-path = "src/main.rs"
+[lib]
+name = "stryke_spark"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
 
 [dependencies]
-clap = { version = "4", default-features = false, features = [
-    "std", "derive", "help", "usage", "error-context", "env",
-] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
 tempfile = "3"
+once_cell = "1"
 
 [profile.release]
 opt-level = 3

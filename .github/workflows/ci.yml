@@ -63,55 +63,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
-  helper-local-spark:
-    name: Helper end-to-end (local[*] Spark)
-    runs-on: ubuntu-latest
-    env:
-      SPARK_VERSION: "3.5.3"
-      HADOOP_PROFILE: "hadoop3"
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Python (for PySpark)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Spark
-        run: |
-          set -euo pipefail
-          curl -fsSL -o spark.tgz "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}.tgz"
-          tar xzf spark.tgz
-          mv "spark-${SPARK_VERSION}-bin-${HADOOP_PROFILE}" /opt/spark
-          echo "SPARK_HOME=/opt/spark" >> "$GITHUB_ENV"
-          echo "/opt/spark/bin" >> "$GITHUB_PATH"
-          pip install "pyspark==${SPARK_VERSION}"
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo build --release --locked
-
-      - name: spark-submit ping
-        run: ./target/release/stryke-spark-helper ping
-
-      - name: Round-trip (query / columnar / range / databases)
-        run: |
-          set -euo pipefail
-          H=./target/release/stryke-spark-helper
-          $H query "SELECT 1 + 1 AS two, 'hi' AS s" | jq -e '.two == 2 and .s == "hi"'
-          $H query "SELECT id FROM range(5)" --columnar | jq -e '.num_rows == 5'
-          $H query "SELECT id FROM range(10000)" --limit 3 | wc -l | tr -d ' ' | grep -x 3
-          $H databases | jq -e '.name == "default"'
-          $H query "SELECT array(1,2,3) AS a, struct(1 AS x, 'y' AS y) AS s" \
-            | jq -e '.a == [1,2,3] and .s.x == 1 and .s.y == "y"'
-
   doc:
     name: Doc
     runs-on: ubuntu-latest
@@ -125,7 +76,7 @@ jobs:
 
   release-build:
     name: Release Build (${{ matrix.target }})
-    needs: [check, test, helper-local-spark]
+    needs: [check, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -147,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: stryke-spark-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/stryke-spark-helper
+          path: target/${{ matrix.target }}/release/libstryke_spark.*
 
   docs-gates:
     name: Docs gates

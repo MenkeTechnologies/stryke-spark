@@ -1,15 +1,26 @@
 [package]
 name = "spark"
-version = "0.1.0"
-description = "Apache Spark client for stryke. Submits via spark-submit with an embedded PySpark driver; returns NDJSON rows. Universal across Spark 3.x clusters."
+version = "0.2.0"
+description = "Apache Spark client for stryke. cdylib loaded in-process — spawns spark-submit with an embedded PySpark driver per call. Persistent SparkSession deferred (needs long-running JVM daemon design)."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-spark"
 edition = "2026"
 
-[bin]
-spark = "bin/spark.stk"
-spark-build = "bin/spark-build.stk"
+[ffi]
+lib-name = "stryke_spark"
+namespace = "Spark"
+exports = [
+    "spark__pkg_version",
+    "spark__ping",
+    "spark__query",
+    "spark__execute",
+    "spark__dump",
+    "spark__tables",
+    "spark__databases",
+    "spark__schema",
+    "spark__submit",
+]
 
 [scripts]
 build = "cargo build --release"

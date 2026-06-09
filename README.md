@@ -56,10 +56,18 @@ argv and writes NDJSON rows to stdout. Universal across Spark 3.x and 4.x
 
 ## [0x01] Install
 
+From a release (no rustc on the consumer machine):
+
+```sh
+s pkg install -g github.com/MenkeTechnologies/stryke-spark
+```
+
+From a local checkout:
+
 ```sh
 cd ~/projects/stryke-spark
-cargo build --release          # produces target/release/stryke-spark-helper
-s pkg install -g .             # installs `spark` and `spark-build` CLIs
+cargo build --release          # produces target/release/libstryke_spark.{dylib,so}
+s pkg install -g .             # cdylib lands in ~/.stryke/store/spark@<version>/
 ```
 
 Or:
@@ -67,6 +75,14 @@ Or:
 ```sh
 make install
 ```
+
+The cdylib is dlopened in-process on first `use Spark`. **Honest scope
+note:** each call still pays SparkSession init cost (seconds, dominated
+by JVM warmup). A long-running JVM driver daemon that persists
+`SparkSession` across calls is deferred — it needs a sidecar process
+design that's larger than the v0.2.0 helper-binary → cdylib refactor.
+What the cdylib model does eliminate is the helper-binary fork+exec
+overhead on top of spark-submit.
 
 You also need `spark-submit` reachable: install Spark via `brew install
 apache-spark`, your distro's package, or unpack a tarball and set
