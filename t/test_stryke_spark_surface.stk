@@ -1,0 +1,34 @@
+## t/test_stryke_spark_surface.stk — wrapper-completeness pin.
+##
+## Asserts every public `fn X::Y::name` declared in lib/*.stk is
+## reachable via `use` at runtime. Uses `exists &X::Y::name` to
+## probe the symbol table without invoking the sub.
+##
+## Catches:
+##   * a wrapper sub deleted from lib/ but still referenced elsewhere
+##   * a sub-package file dropped from the install layout
+##   * `use Foo::Bar` failing to chase into lib/Bar.stk
+##   * an installed-package entry whose namespace bridge is broken
+##
+## Permission-free — no service, no creds, no live daemon. Private
+## helpers (`_` prefix) are implementation detail and are NOT
+## asserted, so refactoring internals stays free.
+
+use Spark
+
+# ── Spark.stk ──────────────────────────────────────────────
+assert_ok exists &Spark::version, "Spark::version exists"
+assert_ok exists &Spark::ping, "Spark::ping exists"
+assert_ok exists &Spark::query, "Spark::query exists"
+assert_ok exists &Spark::query_one, "Spark::query_one exists"
+assert_ok exists &Spark::query_col, "Spark::query_col exists"
+assert_ok exists &Spark::query_scalar, "Spark::query_scalar exists"
+assert_ok exists &Spark::query_stream, "Spark::query_stream exists"
+assert_ok exists &Spark::dump, "Spark::dump exists"
+assert_ok exists &Spark::execute, "Spark::execute exists"
+assert_ok exists &Spark::tables, "Spark::tables exists"
+assert_ok exists &Spark::databases, "Spark::databases exists"
+assert_ok exists &Spark::schema, "Spark::schema exists"
+assert_ok exists &Spark::submit, "Spark::submit exists"
+
+test_run
