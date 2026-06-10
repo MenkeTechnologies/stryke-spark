@@ -622,4 +622,148 @@ mod tests {
     fn ndjson_invalid_line_errors() {
         assert!(ndjson_to_rows("{\"a\":1}\ngarbage\n").is_err());
     }
+
+    // ── apply_to ──
+    //
+    // These tests pin the *exact* CLI surface assembled into spark-submit.
+    // Refactors that move the `cmd.arg("--conf").arg(c)` line inside an
+    // if-branch, swap `starts_with` for substring `contains`, or drop the
+    // default-injection logic will get caught here.
+
+    fn args_of(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Catches: regressions where a user-supplied `spark.log.level=…` conf
+    /// fails to suppress the hard-coded `spark.log.level=ERROR` default,
+    /// resulting in two `--conf` entries for the same key. Spark's behavior
+    /// for duplicate keys is implementation-defined; the contract here is
+    /// "user wins, default is silent." Also pins that user confs are
+    /// ALWAYS appended (not gated behind the suppression check) — a
+    /// tempting refactor that puts the `cmd.arg` inside the `if` would
+    /// silently drop every user conf.
+    #[test]
+    fn apply_to_user_log_level_suppresses_default_and_keeps_user_conf() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({
+                "confs": ["spark.log.level=DEBUG"],
+            }));
+            let mut cmd = Command::new("dummy");
+            o.apply_to(&mut cmd);
+            let args = args_of(&cmd);
+
+            // user conf must be present, exactly once
+            let user_pos = args
+                .iter()
+                .position(|a| a == "spark.log.level=DEBUG")
+                .expect("user log.level conf must survive apply_to");
+            assert_eq!(args[user_pos - 1], "--conf", "user conf needs --conf flag");
+
+            // default ERROR must NOT be present
+            assert!(
+                !args.iter().any(|a| a == "spark.log.level=ERROR"),
+                "default log.level=ERROR must be suppressed when user supplies one: {:?}",
+                args
+            );
+
+            // exactly one log.level conf overall
+            let n = args
+                .iter()
+                .filter(|a| a.starts_with("spark.log.level="))
+                .count();
+            assert_eq!(n, 1, "exactly one log.level conf expected, got {n}: {:?}", args);
+        });
+    }
+
+    /// Catches: regression where the default master fallback (`local[*]`)
+    /// is removed or accidentally gated behind a user-conf check. Also
+    /// pins that an empty `confs` array does NOT suppress the two
+    /// hard-coded defaults (`spark.log.level=ERROR`,
+    /// `spark.sql.catalogImplementation=in-memory`) — both must appear
+    /// because the suppression check is keyed on prefix-match, not on
+    /// "any user confs at all."
+    #[test]
+    fn apply_to_no_user_confs_emits_both_defaults_and_local_master() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({}));
+            let mut cmd = Command::new("dummy");
+            o.apply_to(&mut cmd);
+            let args = args_of(&cmd);
+
+            assert!(
+                args.iter().any(|a| a == "spark.log.level=ERROR"),
+                "default log.level=ERROR missing: {:?}",
+                args
+            );
+            assert!(
+                args.iter()
+                    .any(|a| a == "spark.sql.catalogImplementation=in-memory"),
+                "default catalogImplementation=in-memory missing: {:?}",
+                args
+            );
+
+            // master must default to local[*] — adjacent --master flag.
+            let mpos = args
+                .iter()
+                .position(|a| a == "--master")
+                .expect("--master flag missing");
+            assert_eq!(
+                args.get(mpos + 1).map(String::as_str),
+                Some("local[*]"),
+                "default master must be local[*]: {:?}",
+                args
+            );
+
+            // app name defaults to "stryke-spark" — adjacent --name flag.
+            let npos = args
+                .iter()
+                .position(|a| a == "--name")
+                .expect("--name flag missing");
+            assert_eq!(
+                args.get(npos + 1).map(String::as_str),
+                Some("stryke-spark"),
+                "default app name must be stryke-spark: {:?}",
+                args
+            );
+        });
+    }
+
+    /// Catches: case-sensitivity bug in the catalogImplementation
+    /// suppression check. The code uses `starts_with` on the canonical
+    /// camelCase `spark.sql.catalogImplementation=` but Spark's own
+    /// config keys are case-insensitive on the JVM side. If a user passes
+    /// the conf with different casing (lowercased), the suppression
+    /// fails and BOTH the user's value AND the hard-coded `in-memory`
+    /// default end up on the command line as duplicate `--conf` args.
+    /// Spark's behavior is then "last-wins" — so the default silently
+    /// overrides the user's intent. Documents the current behavior as
+    /// a known limitation; if the impl is fixed to be case-insensitive,
+    /// this test will flip and need updating.
+    #[test]
+    fn apply_to_catalog_impl_suppression_is_case_sensitive() {
+        with_env(|| {
+            // Lowercased key — does NOT match the starts_with prefix.
+            let o = SparkOpts::from_value(&json!({
+                "confs": ["spark.sql.catalogimplementation=hive"],
+            }));
+            let mut cmd = Command::new("dummy");
+            o.apply_to(&mut cmd);
+            let args = args_of(&cmd);
+
+            // Both end up in the command — this is the case-sensitivity bug.
+            assert!(
+                args.iter().any(|a| a == "spark.sql.catalogimplementation=hive"),
+                "user (lowercased) conf must still appear: {:?}",
+                args
+            );
+            assert!(
+                args.iter()
+                    .any(|a| a == "spark.sql.catalogImplementation=in-memory"),
+                "default conf survives because suppression check is case-sensitive: {:?}",
+                args
+            );
+        });
+    }
 }
