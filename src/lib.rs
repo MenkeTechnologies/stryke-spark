@@ -918,4 +918,157 @@ mod tests {
         );
         assert!(msg.contains("null"), "error must mention null, got: {msg}");
     }
+
+    // ── FFI contract ──
+    //
+    // The cdylib is dlopen'd by stryke; every `#[no_mangle] extern "C"`
+    // export crosses an unwind-unsafe boundary. The invariants below are
+    // load-bearing for stryke process stability — a panic that unwinds
+    // past the FFI edge is UB, and an alloc/free mismatch in
+    // `stryke_free_cstring` corrupts the heap of whatever loaded the
+    // cdylib. These are the highest-blast-radius bugs in the crate.
+
+    /// Round-trip an FFI response pointer through `CStr` for assertions.
+    /// SAFETY: `p` must be a non-null pointer returned by an export from
+    /// this cdylib (we only call this on values we just allocated).
+    unsafe fn ffi_to_json(p: *const c_char) -> Value {
+        assert!(!p.is_null(), "FFI export returned null pointer");
+        let s = CStr::from_ptr(p)
+            .to_str()
+            .expect("FFI output must be UTF-8");
+        let v: Value = serde_json::from_str(s).expect("FFI output must be valid JSON");
+        // Caller is responsible for freeing — round-trip back through
+        // stryke_free_cstring on the same pointer to validate the free
+        // contract without leaking.
+        stryke_free_cstring(p as *mut c_char);
+        v
+    }
+
+    /// Catches: a panic inside any handler unwinding across the C ABI.
+    /// `ffi_call` MUST catch panics via `catch_unwind` and convert them
+    /// to a JSON error envelope — otherwise the panic escapes the FFI
+    /// boundary into the dlopen'ing process, which is undefined behavior
+    /// on stable Rust (the stryke host would abort or corrupt). A future
+    /// refactor that drops the `AssertUnwindSafe` wrapper, replaces
+    /// `catch_unwind` with a bare call, or "simplifies" the error path
+    /// to a `?` would silently introduce process-level UB.
+    ///
+    /// The handler used here panics with a unique sentinel so we know
+    /// the panic actually fired (vs the handler returning Ok early and
+    /// faking the test). The returned JSON must contain the documented
+    /// "stryke-spark handler panicked" string — not the panic payload,
+    /// which would leak internal panic messages to stryke users.
+    #[test]
+    fn ffi_call_catches_handler_panic_without_unwinding() {
+        let input = CString::new(r#"{"x":1}"#).unwrap();
+        let p = ffi_call(input.as_ptr(), |_v| -> Result<Value> {
+            panic!("INTERNAL_SENTINEL_PANIC_xyz_42");
+        });
+        // SAFETY: ffi_call always returns a non-null pointer or null on
+        // CString::new failure; we never trigger the latter here.
+        let v = unsafe { ffi_to_json(p) };
+        assert_eq!(
+            v["error"], json!("stryke-spark handler panicked"),
+            "panic must be reported as the documented error string, not the panic payload (got {v})"
+        );
+        // The raw panic payload must NOT leak — stryke users would see
+        // internal panic messages and that's a contract violation.
+        let s = v.to_string();
+        assert!(
+            !s.contains("INTERNAL_SENTINEL_PANIC_xyz_42"),
+            "panic payload leaked to FFI output: {s}",
+        );
+    }
+
+    /// Catches: a refactor that hardcodes a version literal in
+    /// `spark__pkg_version` instead of using `env!("CARGO_PKG_VERSION")`.
+    /// stryke's loader checks the cdylib version against its expected
+    /// version at first `use Spark` to detect ABI skew — a hardcoded
+    /// version literal would silently report the wrong version after a
+    /// `cargo bp` bumps `Cargo.toml`, and stryke would happily call into
+    /// an ABI-incompatible cdylib. Pins the env! → output invariant.
+    #[test]
+    fn ffi_pkg_version_matches_cargo_pkg_version() {
+        let p = spark__pkg_version(std::ptr::null());
+        let v = unsafe { ffi_to_json(p) };
+        assert_eq!(
+            v["version"],
+            json!(env!("CARGO_PKG_VERSION")),
+            "spark__pkg_version must echo CARGO_PKG_VERSION (got {v})",
+        );
+        // Defensive: env! at compile time should be a non-empty version
+        // string. If the build system ever produced an empty version,
+        // stryke's loader check would compare "" == "" and pass — a
+        // false-negative on ABI skew detection.
+        assert!(
+            !env!("CARGO_PKG_VERSION").is_empty(),
+            "CARGO_PKG_VERSION must not be empty at build time",
+        );
+    }
+
+    /// Catches: a refactor of `stryke_free_cstring` that uses
+    /// `Box::from_raw` instead of `CString::from_raw`, or that frees
+    /// pointers it didn't allocate (the C ABI symmetry that backs every
+    /// dlopen'd cdylib). The pairing under test:
+    ///   - `ffi_call` allocates via `CString::new(...).into_raw()`
+    ///   - `stryke_free_cstring` deallocates via `CString::from_raw(p)`
+    ///
+    /// These MUST use the same allocator and the same layout — a refactor
+    /// that swaps one to `Box`/`Vec` would corrupt the host heap in
+    /// release builds where the mismatch goes silently undetected.
+    ///
+    /// We exercise the full round-trip: call an FFI export, hand the
+    /// returned pointer back to `stryke_free_cstring`, repeat many times.
+    /// If the alloc/free pair drifts apart this test will SEGFAULT or
+    /// abort under ASAN/Miri rather than pass silently.
+    #[test]
+    fn ffi_free_cstring_round_trips_with_into_raw() {
+        // Repeated alloc+free under realistic-shaped payloads. If the
+        // allocator pairing is broken, heap corruption surfaces within
+        // a few iterations — pre-fix Box/CString swap would crash here.
+        for _ in 0..256 {
+            let p = spark__pkg_version(std::ptr::null());
+            assert!(!p.is_null(), "spark__pkg_version must not return null");
+            // SAFETY: pointer was just returned by spark__pkg_version,
+            // which allocates via CString::into_raw — the documented
+            // pairing with stryke_free_cstring.
+            unsafe { stryke_free_cstring(p as *mut c_char) };
+        }
+        // Null-free is documented as a no-op; verify it doesn't crash.
+        // A future refactor that drops the early-return null check would
+        // dereference null in CString::from_raw and abort the process.
+        unsafe { stryke_free_cstring(std::ptr::null_mut()) };
+    }
+
+    /// Catches: a refactor that propagates JSON-parse errors out of
+    /// `ffi_call` instead of silently coercing malformed input to
+    /// `Value::Null`. Today, garbage input bytes → `Value::Null` →
+    /// handler runs against Null and returns whatever it returns for
+    /// missing fields. This is the documented contract that stryke's
+    /// dlopen bridge relies on — it never has to pre-validate JSON
+    /// before passing the C string in. A refactor to `?` the parse
+    /// error would crash the test that follows because stryke's bridge
+    /// passes through arbitrary bytes from user code.
+    ///
+    /// Counter-fact: this DOES mean genuine JSON errors are invisible
+    /// to the user. If the bug-bias is the other direction, the test
+    /// flips and we surface the parse error to the JSON envelope. For
+    /// now we pin the current contract because that's what the cdylib
+    /// FFI bridge in stryke is built against.
+    #[test]
+    fn ffi_call_malformed_json_input_silently_becomes_null() {
+        // Garbage that is not valid JSON.
+        let garbage = CString::new("not json {{{").unwrap();
+        let mut captured: Option<Value> = None;
+        let p = ffi_call(garbage.as_ptr(), |v| {
+            captured = Some(v.clone());
+            Ok(json!({"ok": true}))
+        });
+        let _ = unsafe { ffi_to_json(p) };
+        assert_eq!(
+            captured,
+            Some(Value::Null),
+            "malformed JSON input must silently become Value::Null (current contract)",
+        );
+    }
 }
