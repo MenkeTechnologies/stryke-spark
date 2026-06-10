@@ -1,0 +1,36 @@
+#!/usr/bin/env stryke
+# examples/discover.stk — minimum-viable tour of the `Spark` package.
+#
+# Runs end-to-end in CI: missing $SPARK_MASTER or no driver up is non-fatal.
+# Read-only ops are eval-guarded.
+#
+# Run:   s examples/discover.stk
+#        SPARK_MASTER=local s examples/discover.stk
+
+use Spark
+
+p "=== Spark discover ==="
+p "version:      " . Spark::version()
+p "SPARK_MASTER: " . ($ENV{SPARK_MASTER} // "(default local)")
+p ""
+
+val $alive = eval { Spark::ping() }
+
+if ($alive && !$@) {
+    p "driver: reachable — exercising read-only query"
+    val $v = eval { Spark::query_scalar("SELECT 1 + 1") }
+    if (!$@ && defined $v) {
+        p "  SELECT 1 + 1 -> $v"
+    }
+    val @nums = eval { Spark::query_col("SELECT explode(array(10, 20, 30)) AS n") }
+    if (!$@) {
+        p "  explode      -> " . scalar(@nums) . " rows (" . join(",", @nums) . ")"
+    }
+} else {
+    p "driver: not reachable — skipping live ops"
+    p ""
+    p "expected call shape when live:"
+    p "  val \$one  = Spark::query_scalar(\"SELECT 1\")"
+    p "  val @rows = Spark::query(\"SELECT * FROM t LIMIT 5\")"
+    p "  val @c    = Spark::query_col(\"SELECT name FROM users\")"
+}
