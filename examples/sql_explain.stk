@@ -1,0 +1,41 @@
+#!/usr/bin/env stryke
+# examples/sql_explain.stk — EXPLAIN a Spark SQL query.
+#
+# Defaults to `EXPLAIN SELECT 1` when no $ARGV[0] given. Eval-guarded
+# so missing Spark driver exits cleanly.
+#
+# Run:   s examples/sql_explain.stk
+#        SPARK_MASTER=local s examples/sql_explain.stk "SELECT * FROM t"
+
+use Spark
+
+p "=== Spark SQL EXPLAIN ==="
+
+val $alive = eval { Spark::ping() }
+unless ($alive) {
+    p "spark driver not reachable — set SPARK_MASTER and re-run to exercise the demo"
+    exit 0
+}
+
+val $sql = $ARGV[0] // "SELECT explode(array(1, 2, 3, 4, 5)) AS n"
+p "query: $sql"
+p ""
+
+p "── EXPLAIN ──"
+val @plan = eval { Spark::query("EXPLAIN " . $sql) }
+unless ($@) {
+    for val $row (@plan) {
+        p "  " . ($row->{plan} // $row->{"plan"} // to_json($row))
+    }
+}
+
+p ""
+p "── result ──"
+val @rows = eval { Spark::query($sql) }
+unless ($@) {
+    val $n = scalar(@rows)
+    for (var $i = 0; $i < ($n < 10 ? $n : 10); $i++) {
+        p "  " . to_json($rows[$i])
+    }
+    if ($n > 10) { p "  ... + " . ($n - 10) . " more rows" }
+}
