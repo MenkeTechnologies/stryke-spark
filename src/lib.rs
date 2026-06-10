@@ -673,7 +673,11 @@ mod tests {
                 .iter()
                 .filter(|a| a.starts_with("spark.log.level="))
                 .count();
-            assert_eq!(n, 1, "exactly one log.level conf expected, got {n}: {:?}", args);
+            assert_eq!(
+                n, 1,
+                "exactly one log.level conf expected, got {n}: {:?}",
+                args
+            );
         });
     }
 
@@ -754,7 +758,8 @@ mod tests {
 
             // Both end up in the command — this is the case-sensitivity bug.
             assert!(
-                args.iter().any(|a| a == "spark.sql.catalogimplementation=hive"),
+                args.iter()
+                    .any(|a| a == "spark.sql.catalogimplementation=hive"),
                 "user (lowercased) conf must still appear: {:?}",
                 args
             );
