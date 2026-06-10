@@ -23,7 +23,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 const DRIVER_PY: &str = include_str!("driver.py");
@@ -311,20 +311,39 @@ fn op_schema(opts: Value) -> Result<Value> {
     Ok(json!({"rows": rows}))
 }
 
+/// Coerce a JSON-array `args` slot into a list of CLI args for
+/// `spark-submit`. Pre-fix the caller used
+/// `arr.iter().filter_map(|v| v.as_str())` which silently dropped
+/// non-strings — `["--num", 42, "--flag"]` became `["--num", "--flag"]`
+/// and the user got a confusing failure deeper in spark.
+///
+/// New contract: non-strings are coerced to their canonical text form
+/// (bool/number → `to_string`, array/object → JSON); `null` is a hard
+/// error since it can't be meaningfully passed to a CLI.
+fn coerce_submit_args(arr: &[Value]) -> Result<Vec<String>> {
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Bool(b) => out.push(b.to_string()),
+            Value::Number(n) => out.push(n.to_string()),
+            Value::Null => bail!("args[{i}] is null — spark-submit args must be scalar"),
+            Value::Array(_) | Value::Object(_) => out.push(v.to_string()),
+        }
+    }
+    Ok(out)
+}
+
 fn op_submit(opts: Value) -> Result<Value> {
     let so = SparkOpts::from_value(&opts);
     let script = opts["script"]
         .as_str()
         .ok_or_else(|| anyhow!("missing script"))?
         .to_string();
-    let args: Vec<String> = opts["args"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let args: Vec<String> = match opts["args"].as_array() {
+        Some(arr) => coerce_submit_args(arr)?,
+        None => Vec::new(),
+    };
     let submit = so.locate_spark_submit()?;
     let mut cmd = Command::new(&submit);
     so.apply_to(&mut cmd);
@@ -770,5 +789,133 @@ mod tests {
                 args
             );
         });
+    }
+
+    /// Catches: regressions that drop or reorder the optional flag arms
+    /// (`if let Some(m) = master`, `if let Some(d) = deploy_mode`,
+    /// `if let Some(p) = packages`, `if let Some(j) = jars`). Today
+    /// NO existing test fires the Some(_) branches for deploy_mode,
+    /// packages, or jars — refactoring any of those arms to a no-op
+    /// would compile cleanly and break user behavior silently.
+    /// Also pins the contract that each flag immediately precedes
+    /// its value (spark-submit positional contract: `--key value`).
+    #[test]
+    fn apply_to_all_optional_flags_emit_with_adjacent_values() {
+        with_env(|| {
+            let o = SparkOpts::from_value(&json!({
+                "master": "spark://m:7077",
+                "app_name": "custom-app",
+                "deploy_mode": "cluster",
+                "packages": "com.example:lib:1.0",
+                "jars": "/a.jar,/b.jar",
+            }));
+            let mut cmd = Command::new("dummy");
+            o.apply_to(&mut cmd);
+            let args = args_of(&cmd);
+
+            // Helper: assert flag is present AND its value follows immediately.
+            let assert_flag_value = |flag: &str, val: &str| {
+                let pos = args
+                    .iter()
+                    .position(|a| a == flag)
+                    .unwrap_or_else(|| panic!("{flag} missing: {args:?}"));
+                assert_eq!(
+                    args.get(pos + 1).map(String::as_str),
+                    Some(val),
+                    "{flag} value mismatch: {args:?}",
+                );
+            };
+
+            assert_flag_value("--master", "spark://m:7077");
+            assert_flag_value("--name", "custom-app");
+            assert_flag_value("--deploy-mode", "cluster");
+            assert_flag_value("--packages", "com.example:lib:1.0");
+            assert_flag_value("--jars", "/a.jar,/b.jar");
+
+            // Default master local[*] MUST NOT appear when user provided one.
+            assert!(
+                !args.iter().any(|a| a == "local[*]"),
+                "user master must suppress local[*] default: {args:?}",
+            );
+        });
+    }
+
+    /// Catches: refactors that swap `Vec<String>` for `HashSet<String>`
+    /// or otherwise lose stable iteration order on user confs. Spark
+    /// honors last-wins for duplicate keys, so the iteration order of
+    /// `confs` is a load-bearing part of the user contract — a
+    /// HashMap/HashSet refactor would silently make the "last conf wins"
+    /// behavior non-deterministic across runs.
+    #[test]
+    fn apply_to_preserves_user_conf_insertion_order() {
+        with_env(|| {
+            // Three confs chosen so a hash-based reordering is overwhelmingly
+            // likely to scramble them (different prefixes, different lengths).
+            let o = SparkOpts::from_value(&json!({
+                "confs": [
+                    "spark.executor.memory=4g",
+                    "spark.cores.max=8",
+                    "spark.dynamicAllocation.enabled=false",
+                ],
+            }));
+            let mut cmd = Command::new("dummy");
+            o.apply_to(&mut cmd);
+            let args = args_of(&cmd);
+
+            let p1 = args
+                .iter()
+                .position(|a| a == "spark.executor.memory=4g")
+                .expect("first user conf missing");
+            let p2 = args
+                .iter()
+                .position(|a| a == "spark.cores.max=8")
+                .expect("second user conf missing");
+            let p3 = args
+                .iter()
+                .position(|a| a == "spark.dynamicAllocation.enabled=false")
+                .expect("third user conf missing");
+
+            assert!(
+                p1 < p2 && p2 < p3,
+                "user conf order must be preserved (got positions {p1}, {p2}, {p3}): {args:?}",
+            );
+        });
+    }
+
+    /// `coerce_submit_args` must NOT silently drop non-string entries.
+    /// Pre-fix the broken `filter_map(as_str)` turned
+    /// `["--num", 42, "--flag"]` into `["--num", "--flag"]` — the value
+    /// `42` vanished and spark-submit got `--num --flag` (a confusing
+    /// nested-flag error). Now numbers and bools coerce to their string
+    /// form so the user's intent survives.
+    #[test]
+    fn coerce_submit_args_preserves_number_and_bool_values() {
+        let arr = vec![json!("--num"), json!(42), json!("--flag"), json!(true)];
+        let out = coerce_submit_args(&arr).expect("scalar args must coerce");
+        assert_eq!(out, vec!["--num", "42", "--flag", "true"]);
+    }
+
+    /// Arrays/objects in args round-trip via JSON encoding (rare but
+    /// supported — some spark configs accept JSON-encoded values).
+    #[test]
+    fn coerce_submit_args_encodes_compound_values_as_json() {
+        let arr = vec![json!("--config"), json!({"k": 1})];
+        let out = coerce_submit_args(&arr).expect("compound args coerce to JSON");
+        assert_eq!(out, vec!["--config", "{\"k\":1}"]);
+    }
+
+    /// `null` is a hard error — `spark-submit` can't accept it
+    /// meaningfully and pre-fix it would have been silently dropped.
+    /// The user gets a clear error naming the offending index.
+    #[test]
+    fn coerce_submit_args_rejects_null_with_indexed_error() {
+        let arr = vec![json!("--x"), Value::Null, json!("--y")];
+        let err = coerce_submit_args(&arr).expect_err("null must hard-fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("args[1]"),
+            "error must name the index, got: {msg}"
+        );
+        assert!(msg.contains("null"), "error must mention null, got: {msg}");
     }
 }
