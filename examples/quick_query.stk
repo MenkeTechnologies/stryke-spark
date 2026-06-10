@@ -6,7 +6,7 @@
 
 use Spark
 
-val @rows = Spark::query "
+var @rows = Spark::query "
     WITH t AS (
         SELECT 'alice' AS name, 1.5 AS score UNION
         SELECT 'bob',           2.0          UNION
