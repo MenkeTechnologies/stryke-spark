@@ -71,7 +71,7 @@ jobs:
           STEM="stryke-spark-${TAG}-${TRIPLE}"
           mkdir -p "staging/${STEM}/lib"
           cp stryke.toml "staging/${STEM}/"
-          cp lib/Spark.stk "staging/${STEM}/lib/"
+          cp lib/*.stk "staging/${STEM}/lib/"
           cp "target/${TRIPLE}/release/${{ matrix.dylib }}" "staging/${STEM}/lib/"
           ARCHIVE="${STEM}.tar.gz"
           tar -C staging -czf "${ARCHIVE}" "${STEM}"
