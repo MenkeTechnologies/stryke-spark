@@ -28,9 +28,7 @@ binary so the daily-driver install stays slim.
 - [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
 - [\[0x01\] Install](#0x01-install)
 - [\[0x02\] Quick start](#0x02-quick-start)
-- [\[0x03\] CLI: `spark`](#0x03-cli-spark)
 - [\[0x04\] API reference](#0x04-api-reference)
-- [\[0x05\] Helper protocol](#0x05-helper-protocol)
 - [\[0x06\] Type encoding](#0x06-type-encoding)
 - [\[0x07\] Bind parameters](#0x07-bind-parameters)
 - [\[0x08\] Performance notes](#0x08-performance-notes)
@@ -48,11 +46,12 @@ requires the JVM, `spark-submit`, and PySpark on the host. Most stryke
 one-liners never touch Spark; for the ones that do, opt in with this
 package.
 
-`stryke-spark` ships as a thin stryke library plus a small Rust helper
-binary (`stryke-spark-helper`, ~700 KB). The helper shells out to
-`spark-submit` with an **embedded PySpark driver** that reads JSON over
-argv and writes NDJSON rows to stdout. Universal across Spark 3.x and 4.x
-— anywhere `spark-submit` runs, this works.
+`stryke-spark` ships as a thin stryke library plus a Rust cdylib
+(`libstryke_spark.{dylib,so}`). The cdylib shells out to `spark-submit`
+with an **embedded PySpark driver** (`src/driver.py`, compiled in via
+`include_str!`) that reads a JSON request envelope and writes JSON rows
+to stdout. Universal across Spark 3.x and 4.x — anywhere `spark-submit`
+runs, this works.
 
 ## [0x01] Install
 
@@ -92,7 +91,7 @@ apache-spark`, your distro's package, or unpack a tarball and set
 
 Spark 4.x officially supports JDK 17 — JDK 21+ trips a
 `getSubject is not supported` error in the Hive catalog code path even
-under `local[*]`. The helper defaults to
+under `local[*]`. The cdylib defaults to
 `--conf spark.sql.catalogImplementation=in-memory` to dodge Hive, but a
 JDK 17 environment is still the smoothest. Set `JAVA_HOME` before running:
 
@@ -115,7 +114,7 @@ my @rows = Spark::query "
 # Against a remote cluster.
 my @rows = Spark::query "SELECT * FROM events WHERE day = '2026-01-01'",
                         master => "spark://cluster:7077",
-                        conf   => { "spark.executor.memory" => "8g",
+                        confs  => { "spark.executor.memory" => "8g",
                                     "spark.executor.cores"  => "4" }
 
 # Scalar shortcut.
@@ -131,49 +130,19 @@ p Spark::databases |> ep
 
 # Pass-through to spark-submit for jobs outside the SQL surface.
 Spark::submit "jobs/etl_pipeline.py",
-              args => ["--date", "2026-01-01"],
-              conf => { "spark.driver.memory" => "4g" }
+              args  => ["--date", "2026-01-01"],
+              confs => { "spark.driver.memory" => "4g" }
 ```
 
 Each Spark call spins up a fresh JVM (~5–10s warmup). For multi-statement
 work, prefer one SQL with CTEs / subqueries over many separate calls.
-
-## [0x03] CLI: `spark`
-
-```sh
-spark query     "SELECT id FROM range(10) WHERE id > 5"
-spark query     "SELECT * FROM logs" --columnar --limit=100
-spark execute   "CREATE TABLE t (a INT)"
-spark dump      --table=logs --where="ts > '2026-01-01'" --order-by=ts --limit=1000
-spark tables
-spark databases
-spark schema    --table=logs
-spark ping
-spark submit    job.py -- --my-arg=value     # forwards through spark-submit
-spark build                                  # `cargo build --release`
-spark version
-```
-
-Connection flags:
-
-```
---master URL                $SPARK_MASTER   (default: local[*])
---spark-home DIR            $SPARK_HOME
---spark-submit PATH         explicit path to spark-submit
---app-name NAME             default: stryke-spark
---deploy-mode MODE          client | cluster
---packages LIST             Maven coordinates, comma-separated
---jars LIST                 .jar paths, comma-separated
---conf K=V                  repeatable (e.g. -c spark.executor.memory=4g)
--D, --database NAME         USE this database before running the command
-```
 
 ## [0x04] API reference
 
 ### Read paths
 
 ```stryke
-Spark::query        $sql, %opts → @rows | columnar-hashref | meta-hashref
+Spark::query        $sql, %opts → @rows
 Spark::query_stream $sql, %opts → $count               # callback per row
 Spark::query_one    $sql, %opts → \%row | undef
 Spark::query_col    $sql, %opts → @values
@@ -182,8 +151,8 @@ Spark::dump         $table, %opts → @rows
 ```
 
 `%opts` keys: `master`, `spark_home`, `spark_submit`, `app_name`,
-`deploy_mode`, `packages`, `jars`, `database`, `conf` (hashref or
-arrayref), `columnar`, `with_meta`, `limit`, `callback` (stream only).
+`deploy_mode`, `packages`, `jars`, `database`, `confs` (hashref),
+`limit`, `callback` (stream only).
 
 ### DDL / DML
 
@@ -192,64 +161,34 @@ Spark::execute    $sql, %opts → { ok: true }
 ```
 
 DDL covers `CREATE TABLE`, `INSERT INTO`, `DROP`, `MERGE`, etc. Spark's
-own SQL parser handles the dispatch; the helper just runs `spark.sql(...)`
+own SQL parser handles the dispatch; the driver just runs `spark.sql(...)`
 and emits a single `{ok}` ack on success.
 
 ### Metadata
 
 ```stryke
-Spark::ping       %opts → 1 | ""
-Spark::tables     %opts → @names           # via catalog API (in-memory or hive)
-Spark::databases  %opts → @names
-Spark::schema     $table, %opts → { table, columns => [...], properties => {...} }
+Spark::ping       %opts → 1 | 0
+Spark::tables     %opts → @rows            # catalog rows (in-memory or hive)
+Spark::databases  %opts → @rows
+Spark::schema     $table, %opts → @rows    # DESCRIBE TABLE column rows
 ```
 
 ### Submit pass-through
 
 ```stryke
-Spark::submit $script_path, args => [...], %opts → 1
+Spark::submit $script_path, args => [...], %opts → { exit_code, output }
 ```
 
-Runs the script through `spark-submit` and inherits stdout/stderr. Use
-for `.py` / `.jar` workloads.
+Runs the script through `spark-submit`. Use for `.py` / `.jar` workloads.
 
-### Helper plumbing
+### Versions
 
 ```stryke
-Spark::helper_path()   → $abs_path
-Spark::ensure_built()  → $abs_path
-Spark::version()       → "stryke-spark-helper 0.1.1"
+Spark::version()  → package version string
 ```
-
-## [0x05] Helper protocol
-
-```sh
-stryke-spark-helper query    'SELECT 1 + 1 AS two'
-stryke-spark-helper execute  'CREATE TABLE t (a INT)'
-stryke-spark-helper dump     --table=t --limit=100
-stryke-spark-helper tables
-stryke-spark-helper databases
-stryke-spark-helper schema   --table=t
-stryke-spark-helper ping
-stryke-spark-helper submit   job.py -- --my-arg=v
-stryke-spark-helper --master 'spark://cluster:7077' \
-                    --conf spark.executor.memory=8g \
-                    query 'SELECT COUNT(*) FROM events'
-```
-
-Output:
-
-* `query` → NDJSON rows on stdout (from `df.toJSON()`).
-  `--columnar` emits one `{columns, num_rows, rows}` object.
-  `--with-meta` prepends a `{"meta":{columns:[…]}}` line.
-* `execute` → `{"ok": true}` on success
-* `tables` → NDJSON `{"name", "database", "is_temp", "type"}`
-* `databases` → NDJSON `{"name", "description", "location"}`
-* `schema` → `{table, columns:[{name,type,comment}], properties:{}}`
-* `ping` → `ok` on stdout, exit 0
 
 The embedded PySpark driver lives in `src/driver.py` (compiled into the
-helper via `include_str!`). It writes to a temp file at run time so
+cdylib via `include_str!`). It is written to a temp file at run time so
 `spark-submit` can pick it up.
 
 ## [0x06] Type encoding
@@ -283,12 +222,12 @@ deployments). For v1, inline values into the SQL string. Use literal
 quoting at the Spark SQL level (`'string'`, numeric, date literals
 `DATE '2026-01-01'`, etc.).
 
-Bind support via the helper's request JSON can be added once a clean
+Bind support via the cdylib's request JSON can be added once a clean
 cross-version path exists.
 
 ## [0x08] Performance notes
 
-* Each helper call boots a fresh JVM. Plan for ~5–10s startup per call.
+* Each call boots a fresh JVM via `spark-submit`. Plan for ~5–10s startup per call.
 * Batch work into one `query` with CTEs / subqueries / temp views when
   possible — that's a single submit, one JVM.
 * Local Spark warehouse files land under `./spark-warehouse/` and a
@@ -300,18 +239,17 @@ cross-version path exists.
 ## [0x09] Tests
 
 ```sh
-cargo test                                       # unit tests (none yet)
+cargo test                                       # Rust unit tests, no live JVM
 JAVA_HOME=/path/to/jdk-17 s test t/              # end-to-end against local[*]
 ```
 
 The end-to-end suite skips cleanly when `spark-submit` isn't on PATH or
-the helper isn't built.
+the JVM can't start.
 
 ## [0x0A] Dev workflow
 
 ```sh
 make             # release build
-make debug
 make test
 make install     # release + pkg install -g .
 make clean
@@ -321,21 +259,24 @@ make clean
 
 ```
 stryke-spark/
-  stryke.toml                    # stryke package manifest
-  Cargo.toml                     # Rust helper crate manifest
+  stryke.toml                    # stryke package manifest ([ffi] table)
+  Cargo.toml                     # cdylib crate manifest
   Makefile
   src/
-    main.rs                      # stryke-spark-helper binary
-    driver.py                    # embedded PySpark driver
+    lib.rs                       # cdylib — spark__* extern "C" exports
+    driver.py                    # embedded PySpark driver (include_str!)
   lib/
     Spark.stk                    # `use Spark`
   t/
     test_spark.stk               # live end-to-end suite (skips without spark-submit)
+    test_stryke_spark_surface.stk
   tests/
-    contract_cli_round4.rs       # Rust contract tests
+    contract_cli_round4.rs       # Rust contract tests (+ repo lint gates *.sh)
   examples/
+    discover.stk
     quick_query.stk
     range_stats.stk
+    sql_explain.stk
     parquet_pipeline.stk         # pairs with stryke-arrow
   .github/workflows/
     ci.yml                       # cargo + install Spark + local[*] smoke
