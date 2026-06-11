@@ -80,7 +80,7 @@ The cdylib is dlopened in-process on first `use Spark`. **Honest scope
 note:** each call still pays SparkSession init cost (seconds, dominated
 by JVM warmup). A long-running JVM driver daemon that persists
 `SparkSession` across calls is deferred — it needs a sidecar process
-design that's larger than the v0.2.0 helper-binary → cdylib refactor.
+design that's larger than the v0.2.1 helper-binary → cdylib refactor.
 What the cdylib model does eliminate is the helper-binary fork+exec
 overhead on top of spark-submit.
 
