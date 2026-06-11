@@ -582,6 +582,125 @@ mod tests {
         });
     }
 
+    /// Restore PATH around a closure. The crate-wide `with_env` helper
+    /// saves/restores STRYKE_SPARK_SUBMIT and SPARK_HOME but NOT PATH, and
+    /// the locate-precedence tests below must clobber PATH to control the
+    /// `$PATH` fallback scan. Without this, a clobbered PATH would leak into
+    /// every later test in the same binary. ENV_LOCK (held by `with_env`)
+    /// already serializes these, so saving/restoring inside is race-free.
+    fn with_path<F: FnOnce()>(p: &str, f: F) {
+        let saved = std::env::var("PATH").ok();
+        std::env::set_var("PATH", p);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match saved {
+            Some(s) => std::env::set_var("PATH", s),
+            None => std::env::remove_var("PATH"),
+        }
+        if let Err(panic) = r {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// Catches: a refactor that turns the explicit-`spark_submit`
+    /// not-a-file branch (`return Err(...)` at the end of the
+    /// `if let Some(p) = &self.spark_submit` arm) into a fall-through to
+    /// the `$PATH` scan. That regression is a binary-substitution bug: a
+    /// user who typos an explicit `spark_submit` path would SILENTLY run a
+    /// different `spark-submit` found on `$PATH` instead of getting the
+    /// "is not a file" error. The contract is "explicit path is
+    /// authoritative — if it's wrong, fail loudly; never substitute."
+    ///
+    /// We prove non-substitution by planting a REAL, valid `spark-submit`
+    /// on `$PATH` and confirming locate still errors on the bad explicit
+    /// path rather than resolving the PATH one.
+    #[test]
+    fn locate_explicit_bad_does_not_fall_through_to_valid_path() {
+        with_env(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let on_path = dir.path().join("spark-submit");
+            std::fs::write(&on_path, b"#!/bin/sh\n").unwrap();
+            assert!(on_path.is_file(), "fixture spark-submit must exist");
+
+            with_path(dir.path().to_str().unwrap(), || {
+                let o = SparkOpts::from_value(&json!({
+                    "spark_submit": "/definitely/not/here/spark-submit",
+                }));
+                let err = o.locate_spark_submit().unwrap_err().to_string();
+                assert!(
+                    err.contains("is not a file"),
+                    "explicit bad path must error, not silently use $PATH: {err}",
+                );
+                // The PATH one must NOT be what got returned.
+                assert!(
+                    !err.contains(dir.path().to_str().unwrap()),
+                    "error must reference the explicit path, not the PATH dir: {err}",
+                );
+            });
+        });
+    }
+
+    /// Catches: a regression in the `spark_home` → `bin/spark-submit` join
+    /// (line `PathBuf::from(home).join("bin").join("spark-submit")`). If a
+    /// refactor drops the `"bin"` segment, joins in the wrong order, or
+    /// hardcodes a separator, this resolution silently breaks and every
+    /// SPARK_HOME-only user falls back to `$PATH` (or errors). Pins the
+    /// exact resolved path AND that spark_home takes precedence over the
+    /// `$PATH` scan (we leave PATH empty so only the home branch can win).
+    #[test]
+    fn locate_spark_home_resolves_bin_spark_submit() {
+        with_env(|| {
+            let home = tempfile::tempdir().unwrap();
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            let expected = bin.join("spark-submit");
+            std::fs::write(&expected, b"#!/bin/sh\n").unwrap();
+
+            with_path("/no/spark/here", || {
+                let o =
+                    SparkOpts::from_value(&json!({"spark_home": home.path().to_str().unwrap()}));
+                let got = o
+                    .locate_spark_submit()
+                    .expect("spark_home bin must resolve");
+                assert_eq!(
+                    got, expected,
+                    "must resolve $SPARK_HOME/bin/spark-submit exactly",
+                );
+            });
+        });
+    }
+
+    /// Catches: a refactor that makes a *present-but-incomplete*
+    /// `spark_home` (one without `bin/spark-submit`) a hard error instead
+    /// of a soft preference. The current contract is: spark_home is tried
+    /// first, and if `bin/spark-submit` is absent the code FALLS THROUGH to
+    /// the `$PATH` scan (the `if path.is_file()` guard does not early-error
+    /// in the home arm — only the explicit `spark_submit` arm does). A
+    /// refactor that adds an `else { return Err }` to the home arm would
+    /// break users who set SPARK_HOME for other Spark tooling but rely on a
+    /// PATH-installed spark-submit. We prove fall-through by planting the
+    /// real binary ONLY on PATH and leaving spark_home's bin empty.
+    #[test]
+    fn locate_spark_home_without_bin_falls_through_to_path() {
+        with_env(|| {
+            let home = tempfile::tempdir().unwrap(); // no bin/ created
+            let path_dir = tempfile::tempdir().unwrap();
+            let on_path = path_dir.path().join("spark-submit");
+            std::fs::write(&on_path, b"#!/bin/sh\n").unwrap();
+
+            with_path(path_dir.path().to_str().unwrap(), || {
+                let o =
+                    SparkOpts::from_value(&json!({"spark_home": home.path().to_str().unwrap()}));
+                let got = o
+                    .locate_spark_submit()
+                    .expect("incomplete spark_home must fall through to PATH, not error");
+                assert_eq!(
+                    got, on_path,
+                    "must resolve the PATH spark-submit when spark_home lacks bin/",
+                );
+            });
+        });
+    }
+
     // ── build_request ──
 
     #[test]
