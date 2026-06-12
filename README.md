@@ -148,6 +148,7 @@ Spark::query_one    $sql, %opts → \%row | undef
 Spark::query_col    $sql, %opts → @values
 Spark::query_scalar $sql, %opts → $value | undef
 Spark::dump         $table, %opts → @rows
+Spark::count        $table, $where?, %opts → $row_count   # SELECT count(*) [WHERE $where]
 ```
 
 `%opts` keys: `master`, `spark_home`, `spark_submit`, `app_name`,

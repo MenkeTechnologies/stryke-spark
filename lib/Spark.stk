@@ -146,3 +146,18 @@ fn Spark::submit ($script, %opts) {
     Spark::_decode("submit", spark__submit(to_json($r)))
 }
 
+
+# ── convenience composites ──────────────────────────────────────────
+#
+# Pure-stryke over query_scalar / tables — no new FFI. The slurpy %opts
+# (master, app_name, database, …) is forwarded directly as the trailing
+# splat; never copied or followed by pairs (stryke BUG-306).
+
+## Number of rows in $table (optional WHERE clause $where). The table
+## name is interpolated — pass only trusted/validated names.
+fn Spark::count ($table, $where = undef, %opts) {
+    val $sql = defined($where) && length($where)
+        ? "SELECT count(*) AS n FROM $table WHERE $where"
+        : "SELECT count(*) AS n FROM $table"
+    Spark::query_scalar($sql, %opts) + 0
+}

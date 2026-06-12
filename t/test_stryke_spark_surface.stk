@@ -30,5 +30,6 @@ assert_ok exists &Spark::tables, "Spark::tables exists"
 assert_ok exists &Spark::databases, "Spark::databases exists"
 assert_ok exists &Spark::schema, "Spark::schema exists"
 assert_ok exists &Spark::submit, "Spark::submit exists"
+assert_ok exists &Spark::count, "Spark::count exists"
 
 test_run
