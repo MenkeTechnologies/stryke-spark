@@ -116,6 +116,38 @@ fn Spark::execute ($sql, %opts) {
     Spark::_decode("execute", spark__execute(to_json($r)))
 }
 
+## Return the query plan for $sql. opts: mode (simple|extended|codegen|cost|
+## formatted, default formatted). Returns the plan text.
+fn Spark::explain ($sql, %opts) {
+    val $r = Spark::_req({ sql => $sql, mode => $opts{mode} }, \%opts)
+    Spark::_decode("explain", spark__explain(to_json($r)))->{plan}
+}
+
+# ── external read / write ───────────────────────────────────────────
+
+## Load an external source ($path) and return rows. opts: format
+## (parquet|csv|json|orc, default parquet), options => { reader opts },
+## view (register a temp view), sql (run against the registered view), limit.
+fn Spark::read ($path, %opts) {
+    val $r = Spark::_req(
+        { path => $path, format => $opts{format}, options => $opts{options},
+          view => $opts{view}, sql => $opts{sql}, limit => $opts{limit} },
+        \%opts)
+    val $res = Spark::_decode("read", spark__read(to_json($r)))
+    @{ $res->{rows} }
+}
+
+## Write the result of $sql to a path or table. opts: path OR table (one
+## required), format (default parquet), mode (overwrite|append|ignore|
+## errorifexists), options => { writer opts }. Returns { ok, ... }.
+fn Spark::write ($sql, %opts) {
+    val $r = Spark::_req(
+        { sql => $sql, path => $opts{path}, table => $opts{table},
+          format => $opts{format}, mode => $opts{mode}, options => $opts{options} },
+        \%opts)
+    Spark::_decode("write", spark__write(to_json($r)))
+}
+
 # ── metadata ────────────────────────────────────────────────────────
 
 ## List tables in the current Spark catalog.
@@ -135,6 +167,38 @@ fn Spark::schema ($table, %opts) {
     val $r = Spark::_req({ table => $table }, \%opts)
     val $res = Spark::_decode("schema", spark__schema(to_json($r)))
     @{ $res->{rows} }
+}
+
+## Catalog columns of $table (name/type/nullable/is_partition/is_bucket).
+fn Spark::columns ($table, %opts) {
+    val $r = Spark::_req({ table => $table }, \%opts)
+    val $res = Spark::_decode("columns", spark__columns(to_json($r)))
+    @{ $res->{rows} }
+}
+
+## List catalog functions (name/description/class_name/is_temporary).
+fn Spark::functions (%opts) {
+    val $o = Spark::_decode("functions", spark__functions(to_json(Spark::_req({}, \%opts))))
+    @{ $o->{rows} }
+}
+
+# ── caching + runtime config ────────────────────────────────────────
+
+## Cache $table in memory.
+fn Spark::cache ($table, %opts) {
+    Spark::_decode("cache", spark__cache(to_json(Spark::_req({ table => $table }, \%opts))))
+}
+
+## Uncache $table.
+fn Spark::uncache ($table, %opts) {
+    Spark::_decode("uncache", spark__uncache(to_json(Spark::_req({ table => $table }, \%opts))))
+}
+
+## Get a Spark runtime config value (one arg), or set it (with value => ...).
+fn Spark::config ($key, %opts) {
+    val $r = Spark::_req({ key => $key, value => $opts{value} }, \%opts)
+    val $res = Spark::_decode("config", spark__config(to_json($r)))
+    exists $opts{value} ? $res : $res->{value}
 }
 
 # ── submit (pass-through) ───────────────────────────────────────────

@@ -5,16 +5,17 @@
 //! PySpark driver. stryke's FFI bridge (`rust_ffi.rs::load_cdylib`)
 //! resolves these symbols at first `use Spark`.
 //!
-//! Honest scope note: each call STILL pays SparkSession init cost
-//! (seconds, dominated by the JVM warmup). A long-running JVM driver
-//! daemon that persists `SparkSession` across calls is deferred to a
-//! future revision — it needs a sidecar process design that's larger
-//! than the v0.2.0 helper-binary → cdylib refactor. The cdylib model
+//! Scope: each call STILL pays SparkSession init cost (seconds, dominated
+//! by JVM warmup). A long-running JVM driver daemon that persists
+//! `SparkSession` across calls is deferred — it needs a sidecar process
+//! design larger than the helper-binary → cdylib refactor. The cdylib model
 //! does eliminate the helper-binary fork+exec overhead on top of
 //! spark-submit, but the SparkSession init cost is unchanged.
 //!
-//! v0.2.0 ops: query, execute, dump, schema, tables, databases, ping,
-//! submit.
+//! Ops: query/dump/execute/explain SQL, read/write external sources
+//! (parquet/csv/json/orc), catalog metadata (tables/databases/schema/columns/
+//! functions), cache/uncache, runtime config get/set, ping, and a raw
+//! spark-submit pass-through.
 
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
@@ -311,6 +312,142 @@ fn op_schema(opts: Value) -> Result<Value> {
     Ok(json!({"rows": rows}))
 }
 
+/// Copy an optional string field from `opts` into `body` under the same key.
+fn copy_str(opts: &Value, body: &mut serde_json::Map<String, Value>, key: &str) {
+    if let Some(s) = opts[key].as_str() {
+        body.insert(key.into(), Value::String(s.into()));
+    }
+}
+
+fn op_explain(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let sql = opts["sql"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sql"))?
+        .to_string();
+    let mut body = serde_json::Map::new();
+    body.insert("cmd".into(), Value::String("explain".into()));
+    body.insert("sql".into(), Value::String(sql));
+    copy_str(&opts, &mut body, "mode");
+    let req = build_request(&so, Value::Object(body));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    // explain emits one summary line: { plan: "..." }.
+    Ok(rows
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| json!({"plan": ""})))
+}
+
+fn op_read(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let path = opts["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?
+        .to_string();
+    let mut body = serde_json::Map::new();
+    body.insert("cmd".into(), Value::String("read".into()));
+    body.insert("path".into(), Value::String(path));
+    copy_str(&opts, &mut body, "format");
+    copy_str(&opts, &mut body, "view");
+    copy_str(&opts, &mut body, "sql");
+    if opts["options"].is_object() {
+        body.insert("options".into(), opts["options"].clone());
+    }
+    if let Some(n) = opts["limit"].as_u64() {
+        body.insert("limit".into(), Value::from(n));
+    }
+    let req = build_request(&so, Value::Object(body));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    Ok(json!({"rows": rows}))
+}
+
+fn op_write(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let sql = opts["sql"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sql (query producing the data to write)"))?
+        .to_string();
+    // Exactly one of `path` / `table` is the write target.
+    if opts["path"].as_str().is_none() && opts["table"].as_str().is_none() {
+        return Err(anyhow!("write needs a `path` or a `table` target"));
+    }
+    let mut body = serde_json::Map::new();
+    body.insert("cmd".into(), Value::String("write".into()));
+    body.insert("sql".into(), Value::String(sql));
+    copy_str(&opts, &mut body, "path");
+    copy_str(&opts, &mut body, "table");
+    copy_str(&opts, &mut body, "format");
+    copy_str(&opts, &mut body, "mode");
+    if opts["options"].is_object() {
+        body.insert("options".into(), opts["options"].clone());
+    }
+    let req = build_request(&so, Value::Object(body));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| json!({"ok": true})))
+}
+
+fn op_columns(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    let req = build_request(&so, json!({"cmd": "columns", "table": table}));
+    let out = run_driver(&so, req)?;
+    Ok(json!({"rows": ndjson_to_rows(&out)?}))
+}
+
+fn op_functions(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let req = build_request(&so, json!({"cmd": "functions"}));
+    let out = run_driver(&so, req)?;
+    Ok(json!({"rows": ndjson_to_rows(&out)?}))
+}
+
+/// Shared body for cache / uncache — both take a single `table`.
+fn op_cache_like(opts: Value, cmd: &str) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    let req = build_request(&so, json!({"cmd": cmd, "table": table}));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| json!({"ok": true})))
+}
+
+fn op_config(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let key = opts["key"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing key"))?
+        .to_string();
+    let mut body = serde_json::Map::new();
+    body.insert("cmd".into(), Value::String("config".into()));
+    body.insert("key".into(), Value::String(key));
+    // Presence of `value` switches the driver from get to set.
+    if !opts["value"].is_null() {
+        body.insert("value".into(), opts["value"].clone());
+    }
+    let req = build_request(&so, Value::Object(body));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| json!({"ok": true})))
+}
+
 /// Coerce a JSON-array `args` slot into a list of CLI args for
 /// `spark-submit`. Pre-fix the caller used
 /// `arr.iter().filter_map(|v| v.as_str())` which silently dropped
@@ -452,6 +589,46 @@ pub extern "C" fn spark__schema(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__submit(args: *const c_char) -> *const c_char {
     ffi_call(args, op_submit)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__explain(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_explain)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__read(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_read)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__write(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_write)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__columns(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_columns)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__functions(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_functions)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__cache(args: *const c_char) -> *const c_char {
+    ffi_call(args, |o| op_cache_like(o, "cache"))
+}
+
+#[no_mangle]
+pub extern "C" fn spark__uncache(args: *const c_char) -> *const c_char {
+    ffi_call(args, |o| op_cache_like(o, "uncache"))
+}
+
+#[no_mangle]
+pub extern "C" fn spark__config(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_config)
 }
 
 #[cfg(test)]
@@ -1189,5 +1366,48 @@ mod tests {
             Some(Value::Null),
             "malformed JSON input must silently become Value::Null (current contract)",
         );
+    }
+
+    /// Every new export must validate its required arg BEFORE locating /
+    /// spawning spark-submit — a typo should surface instantly, not after a
+    /// multi-second JVM warmup. Each call passes args missing the required
+    /// key; the documented error must come back fast and must never mention
+    /// spark-submit (which would mean it tried to spawn).
+    #[test]
+    fn new_ops_validate_before_spark_submit() {
+        with_env(|| {
+            let cases: &[(extern "C" fn(*const c_char) -> *const c_char, &str, &str)] = &[
+                (spark__explain, r#"{}"#, "missing sql"),
+                (spark__read, r#"{}"#, "missing path"),
+                (spark__write, r#"{}"#, "missing sql"),
+                (
+                    spark__write,
+                    r#"{"sql":"select 1"}"#,
+                    "needs a `path` or a `table`",
+                ),
+                (spark__columns, r#"{}"#, "missing table"),
+                (spark__cache, r#"{}"#, "missing table"),
+                (spark__uncache, r#"{}"#, "missing table"),
+                (spark__config, r#"{}"#, "missing key"),
+            ];
+            for (f, arg, want) in cases {
+                let cs = CString::new(*arg).unwrap();
+                let start = std::time::Instant::now();
+                let v = unsafe { ffi_to_json(f(cs.as_ptr())) };
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(2),
+                    "validation for {want} took too long — spawned spark-submit?"
+                );
+                let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                assert!(
+                    err.contains(want),
+                    "expected `{want}` for {arg}; got: {err}"
+                );
+                assert!(
+                    !err.contains("spark-submit"),
+                    "validation must fire before spark-submit lookup; got: {err}"
+                );
+            }
+        });
     }
 }

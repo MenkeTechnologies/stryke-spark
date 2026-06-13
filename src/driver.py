@@ -143,6 +143,97 @@ def cmd_schema(spark, req):
     })
 
 
+def cmd_explain(spark, req):
+    # EXPLAIN [EXTENDED|CODEGEN|COST|FORMATTED] <statement>. SIMPLE is the
+    # default (no keyword). Collect the single plan column into one text blob.
+    mode = (req.get("mode") or "formatted").upper()
+    keyword = "" if mode in ("", "SIMPLE") else mode + " "
+    plan_df = spark.sql("EXPLAIN " + keyword + req["sql"])
+    text = "\n".join((r[0] or "") for r in plan_df.collect())
+    _out({"plan": text})
+
+
+def _apply_options(builder, options):
+    for k, v in (options or {}).items():
+        builder = builder.option(k, str(v))
+    return builder
+
+
+def cmd_read(spark, req):
+    # Load an external source (parquet/csv/json/orc/...) and either preview it
+    # or run a follow-up SQL against it via a registered temp view. Each call
+    # is a fresh SparkSession, so the read + query happen together here.
+    fmt = req.get("format") or "parquet"
+    reader = _apply_options(spark.read.format(fmt), req.get("options"))
+    df = reader.load(req["path"])
+    view = req.get("view")
+    if view:
+        df.createOrReplaceTempView(view)
+    if req.get("sql"):
+        df = spark.sql(req["sql"])
+    if req.get("limit"):
+        df = df.limit(int(req["limit"]))
+    for json_row in df.toJSON().collect():
+        sys.stdout.write(json_row)
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def cmd_write(spark, req):
+    # Run `sql` to produce a DataFrame, then write it to a path or table.
+    df = spark.sql(req["sql"])
+    fmt = req.get("format") or "parquet"
+    mode = req.get("mode") or "errorifexists"
+    writer = _apply_options(df.write.format(fmt).mode(mode), req.get("options"))
+    if req.get("table"):
+        writer.saveAsTable(req["table"])
+        _out({"ok": True, "format": fmt, "mode": mode, "table": req["table"]})
+    else:
+        writer.save(req["path"])
+        _out({"ok": True, "format": fmt, "mode": mode, "path": req["path"]})
+
+
+def cmd_functions(spark, req):
+    for f in spark.catalog.listFunctions():
+        _out({
+            "name": f.name,
+            "description": getattr(f, "description", None),
+            "class_name": getattr(f, "className", None),
+            "is_temporary": getattr(f, "isTemporary", None),
+        })
+
+
+def cmd_columns(spark, req):
+    for c in spark.catalog.listColumns(req["table"]):
+        _out({
+            "name": c.name,
+            "type": getattr(c, "dataType", None),
+            "nullable": getattr(c, "nullable", None),
+            "is_partition": getattr(c, "isPartition", None),
+            "is_bucket": getattr(c, "isBucket", None),
+            "description": getattr(c, "description", None),
+        })
+
+
+def cmd_cache(spark, req):
+    spark.catalog.cacheTable(req["table"])
+    _out({"ok": True, "cached": req["table"]})
+
+
+def cmd_uncache(spark, req):
+    spark.catalog.uncacheTable(req["table"])
+    _out({"ok": True, "uncached": req["table"]})
+
+
+def cmd_config(spark, req):
+    key = req["key"]
+    if "value" in req and req["value"] is not None:
+        spark.conf.set(key, str(req["value"]))
+        _out({"ok": True, "key": key})
+    else:
+        _out({"key": key, "value": spark.conf.get(key, None)})
+
+
 def cmd_ping(spark, req):
     val = spark.sql("SELECT 1 AS one").collect()[0][0]
     if val == 1:
@@ -170,9 +261,17 @@ DISPATCH = {
     "query": cmd_query,
     "execute": cmd_execute,
     "dump": cmd_dump,
+    "explain": cmd_explain,
+    "read": cmd_read,
+    "write": cmd_write,
     "tables": cmd_tables,
     "databases": cmd_databases,
     "schema": cmd_schema,
+    "columns": cmd_columns,
+    "functions": cmd_functions,
+    "cache": cmd_cache,
+    "uncache": cmd_uncache,
+    "config": cmd_config,
     "ping": cmd_ping,
 }
 

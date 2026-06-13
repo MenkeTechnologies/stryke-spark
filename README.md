@@ -159,11 +159,24 @@ Spark::count        $table, $where?, %opts → $row_count   # SELECT count(*) [W
 
 ```stryke
 Spark::execute    $sql, %opts → { ok: true }
+Spark::explain    $sql, %opts → $plan_text     # opts: mode (simple|extended|codegen|cost|formatted)
 ```
 
 DDL covers `CREATE TABLE`, `INSERT INTO`, `DROP`, `MERGE`, etc. Spark's
 own SQL parser handles the dispatch; the driver just runs `spark.sql(...)`
-and emits a single `{ok}` ack on success.
+and emits a single `{ok}` ack on success. `explain` returns the query plan.
+
+### External read / write
+
+```stryke
+Spark::read   $path, %opts → @rows         # opts: format, options, view, sql, limit
+Spark::write  $sql,  %opts → { ok, ... }   # opts: path|table, format, mode, options
+```
+
+`read` loads a parquet/csv/json/orc source; pass `view => "v", sql => "SELECT
+… FROM v"` to query it in the same call (each call is a fresh session).
+`write` runs `$sql` and saves the result to a `path` or `table`, with `mode`
+∈ `overwrite|append|ignore|errorifexists`.
 
 ### Metadata
 
@@ -172,6 +185,16 @@ Spark::ping       %opts → 1 | 0
 Spark::tables     %opts → @rows            # catalog rows (in-memory or hive)
 Spark::databases  %opts → @rows
 Spark::schema     $table, %opts → @rows    # DESCRIBE TABLE column rows
+Spark::columns    $table, %opts → @rows    # catalog columns (name/type/nullable/partition/bucket)
+Spark::functions  %opts → @rows            # catalog functions
+```
+
+### Caching + runtime config
+
+```stryke
+Spark::cache    $table, %opts → { ok, cached }
+Spark::uncache  $table, %opts → { ok, uncached }
+Spark::config   $key, %opts → $value | { ok }   # set with value => ...
 ```
 
 ### Submit pass-through

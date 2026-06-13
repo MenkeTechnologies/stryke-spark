@@ -15,10 +15,18 @@ exports = [
     "spark__ping",
     "spark__query",
     "spark__execute",
+    "spark__explain",
     "spark__dump",
+    "spark__read",
+    "spark__write",
     "spark__tables",
     "spark__databases",
     "spark__schema",
+    "spark__columns",
+    "spark__functions",
+    "spark__cache",
+    "spark__uncache",
+    "spark__config",
     "spark__submit",
 ]
 
