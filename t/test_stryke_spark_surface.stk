@@ -45,4 +45,9 @@ assert_ok exists &Spark::views, "Spark::views exists"
 assert_ok exists &Spark::catalogs, "Spark::catalogs exists"
 assert_ok exists &Spark::current_database, "Spark::current_database exists"
 
+assert_ok exists &Spark::create_temp_view, "Spark::create_temp_view exists"
+assert_ok exists &Spark::drop_temp_view, "Spark::drop_temp_view exists"
+assert_ok exists &Spark::set_database, "Spark::set_database exists"
+assert_ok exists &Spark::refresh_table, "Spark::refresh_table exists"
+
 test_run

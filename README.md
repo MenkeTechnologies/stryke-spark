@@ -187,6 +187,10 @@ Spark::databases  %opts → @rows
 Spark::views      %opts → @rows            # views (catalog tableType VIEW / temp)
 Spark::catalogs   %opts → @rows            # { name, description }
 Spark::current_database %opts → $name      # current database
+Spark::create_temp_view $name, $sql, %opts → \%resp  # register $sql as a temp view
+Spark::drop_temp_view   $name, %opts → \%resp
+Spark::set_database     $database, %opts → \%resp    # catalog.setCurrentDatabase
+Spark::refresh_table    $table, %opts → \%resp       # catalog.refreshTable
 Spark::schema     $table, %opts → @rows    # DESCRIBE TABLE column rows
 Spark::columns    $table, %opts → @rows    # catalog columns (name/type/nullable/partition/bucket)
 Spark::functions  %opts → @rows            # catalog functions

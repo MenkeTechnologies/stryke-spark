@@ -243,3 +243,29 @@ fn Spark::current_database (%opts) {
     Spark::_decode("current_database",
         spark__current_database(to_json(Spark::_req({}, \%opts))))->{database}
 }
+
+# ── temp views + session ─────────────────────────────────────────────
+
+## Register $sql as a temporary view named $name (createOrReplaceTempView).
+fn Spark::create_temp_view ($name, $sql, %opts) {
+    val $r = Spark::_req({ name => $name, sql => $sql }, \%opts)
+    Spark::_decode("create_temp_view", spark__create_temp_view(to_json($r)))
+}
+
+## Drop a temporary view by $name. Returns { ok, dropped }.
+fn Spark::drop_temp_view ($name, %opts) {
+    val $r = Spark::_req({ name => $name }, \%opts)
+    Spark::_decode("drop_temp_view", spark__drop_temp_view(to_json($r)))
+}
+
+## Set the current database (catalog.setCurrentDatabase).
+fn Spark::set_database ($database, %opts) {
+    val $r = Spark::_req({ database => $database }, \%opts)
+    Spark::_decode("set_database", spark__set_database(to_json($r)))
+}
+
+## Invalidate and refresh cached metadata for $table (catalog.refreshTable).
+fn Spark::refresh_table ($table, %opts) {
+    val $r = Spark::_req({ table => $table }, \%opts)
+    Spark::_decode("refresh_table", spark__refresh_table(to_json($r)))
+}

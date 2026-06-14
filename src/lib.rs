@@ -325,6 +325,41 @@ fn op_current_database(opts: Value) -> Result<Value> {
     Ok(json!({"database": rows.first().and_then(|r| r.get("database")).cloned()}))
 }
 
+/// Drive a single-row command that takes one extra string field (e.g. a
+/// temp-view name, database, or table) and returns the driver's ok-row.
+fn op_single(opts: Value, cmd: &str, field: &str, extra: &[&str]) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let val = opts[field]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing {}", field))?
+        .to_string();
+    let mut body = json!({"cmd": cmd, field: val});
+    for e in extra {
+        if let Some(s) = opts[*e].as_str() {
+            body[*e] = json!(s);
+        }
+    }
+    let out = run_driver(&so, build_request(&so, body))?;
+    let rows = ndjson_to_rows(&out)?;
+    Ok(rows.into_iter().next().unwrap_or(json!({"ok": true})))
+}
+
+fn op_create_temp_view(opts: Value) -> Result<Value> {
+    op_single(opts, "create_temp_view", "name", &["sql"])
+}
+
+fn op_drop_temp_view(opts: Value) -> Result<Value> {
+    op_single(opts, "drop_temp_view", "name", &[])
+}
+
+fn op_set_database(opts: Value) -> Result<Value> {
+    op_single(opts, "set_database", "database", &[])
+}
+
+fn op_refresh_table(opts: Value) -> Result<Value> {
+    op_single(opts, "refresh_table", "table", &[])
+}
+
 fn op_schema(opts: Value) -> Result<Value> {
     let so = SparkOpts::from_value(&opts);
     let table = opts["table"]
@@ -619,6 +654,26 @@ pub extern "C" fn spark__catalogs(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__current_database(args: *const c_char) -> *const c_char {
     ffi_call(args, op_current_database)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__create_temp_view(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_create_temp_view)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__drop_temp_view(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_drop_temp_view)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__set_database(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_set_database)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__refresh_table(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_refresh_table)
 }
 
 #[no_mangle]

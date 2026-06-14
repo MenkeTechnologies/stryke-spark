@@ -246,6 +246,26 @@ def cmd_current_database(spark, req):
     _out({"database": spark.catalog.currentDatabase()})
 
 
+def cmd_create_temp_view(spark, req):
+    spark.sql(req["sql"]).createOrReplaceTempView(req["name"])
+    _out({"ok": True, "view": req["name"]})
+
+
+def cmd_drop_temp_view(spark, req):
+    dropped = spark.catalog.dropTempView(req["name"])
+    _out({"ok": True, "dropped": bool(dropped)})
+
+
+def cmd_set_database(spark, req):
+    spark.catalog.setCurrentDatabase(req["database"])
+    _out({"ok": True, "database": req["database"]})
+
+
+def cmd_refresh_table(spark, req):
+    spark.catalog.refreshTable(req["table"])
+    _out({"ok": True, "refreshed": req["table"]})
+
+
 def cmd_columns(spark, req):
     for c in spark.catalog.listColumns(req["table"]):
         _out({
@@ -312,6 +332,10 @@ DISPATCH = {
     "views": cmd_views,
     "catalogs": cmd_catalogs,
     "current_database": cmd_current_database,
+    "create_temp_view": cmd_create_temp_view,
+    "drop_temp_view": cmd_drop_temp_view,
+    "set_database": cmd_set_database,
+    "refresh_table": cmd_refresh_table,
     "schema": cmd_schema,
     "columns": cmd_columns,
     "functions": cmd_functions,
