@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="stryke-spark — APACHE SPARK CLIENT FOR STRYKE // OPT-IN PACKAGE. Apache Spark client for stryke. Opt-in package targeting Spark Connect (post-3.4) over gRPC, so no JVM is required on the client side.">
+  <meta name="description" content="stryke-spark — APACHE SPARK CLIENT FOR STRYKE // OPT-IN PACKAGE. Apache Spark client for stryke. Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim — ships as a Rust cdylib that stryke dlopens in-process on first `use Spark`.">
   <title>stryke-spark — Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -86,7 +86,7 @@
             <span class="sep">/</span>
             <a href="https://github.com/MenkeTechnologies/MenkeTechnologiesMeta" target="_blank" rel="noopener noreferrer">Meta</a>
           </nav>
-          <p class="docs-build-line">stryke package · CLI launcher <code>spark</code> · Rust helper <code>stryke-spark-helper</code> · opt-in (kept out of stryke core)</p>
+          <p class="docs-build-line">stryke package · cdylib <code>libstryke_spark.{dylib,so}</code> · dlopen'd in-process on <code>use Spark</code> · opt-in (kept out of stryke core)</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -108,57 +108,59 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>STRYKE-SPARK</h2>
-      <p class="tutorial-subtitle"><strong>Distributed compute from a stryke one-liner.</strong> Apache Spark client for stryke. Opt-in package targeting Spark Connect (post-3.4) over gRPC, so no JVM is required on the client side.</p>
+      <p class="tutorial-subtitle"><strong>Distributed compute from a stryke one-liner.</strong> Apache Spark client for stryke. Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim. Ships as a Rust cdylib that stryke <code>dlopen</code>s in-process on first <code>use Spark</code>; the cdylib drives Spark through <code>spark-submit</code> with an embedded PySpark driver (<code>src/driver.py</code>, compiled in via <code>include_str!</code>).</p>
 
       <section class="tutorial-section">
         <h2>Install</h2>
-<pre># build the helper binary, install as a stryke package
+<pre># from a release (no rustc on the consumer machine)
+s pkg install -g github.com/MenkeTechnologies/stryke-spark
+
+# from a local checkout
 cd ~/projects/stryke-spark
-cargo build --release
-s pkg install -g .
+cargo build --release            # produces target/release/libstryke_spark.{dylib,so}
+s pkg install -g .               # cdylib lands in ~/.stryke/store/spark@&lt;version&gt;/
 
 # one-liner
-make install
-
-# verify
-spark --help</pre>
-        <p>After install, <code>spark --help</code> works from anywhere on PATH (assuming <code>~/.stryke/bin/</code> is on PATH). The stryke library is auto-discoverable to any project that depends on the package via <code>[deps] spark = { path = "..." }</code> or, when published, by name.</p>
+make install</pre>
+        <p>The cdylib is dlopened in-process on first <code>use Spark</code> &mdash; no helper-binary fork per call. You also need <code>spark-submit</code> reachable (e.g. <code>brew install apache-spark</code> or a tarball with <code>$SPARK_HOME</code> set). Any stryke script that declares <code>use Spark</code> resolves the package automatically.</p>
       </section>
 
       <section class="tutorial-section">
-        <h2>CLI: <code>spark</code></h2>
+        <h2>Quick start: <code>use Spark</code></h2>
         <table class="example-tbl">
           <tbody>
-            <tr><td>connect + run SQL</td><td><code>spark sql 'SELECT count(*) FROM my_table' --remote sc://spark-connect:15002</code></td></tr>
-            <tr><td>submit a DataFrame op</td><td><code>spark df read parquet s3://bucket/path | spark df filter 'qty > 100' | spark df show</code></td></tr>
-            <tr><td>list tables</td><td><code>spark tables list</code></td></tr>
-            <tr><td>describe a table schema</td><td><code>spark table describe my_table</code></td></tr>
+            <tr><td>plain query (local[*])</td><td><code>my @rows = Spark::query "SELECT id, id * 2 AS doubled FROM range(5)"</code></td></tr>
+            <tr><td>remote cluster</td><td><code>Spark::query "SELECT * FROM events", master =&gt; "spark://cluster:7077"</code></td></tr>
+            <tr><td>scalar shortcut</td><td><code>p Spark::query_scalar "SELECT COUNT(*) FROM range(1000000)"</code></td></tr>
+            <tr><td>DDL</td><td><code>Spark::execute "CREATE TABLE IF NOT EXISTS logs (ts TIMESTAMP, msg STRING)"</code></td></tr>
+            <tr><td>schema</td><td><code>p to_json Spark::schema "logs"</code></td></tr>
+            <tr><td>table / database listings</td><td><code>p Spark::tables |&gt; ep; p Spark::databases |&gt; ep</code></td></tr>
+            <tr><td>spark-submit pass-through</td><td><code>Spark::submit "jobs/etl_pipeline.py", args =&gt; ["--date", "2026-01-01"]</code></td></tr>
           </tbody>
         </table>
-        <p>The full flag matrix lives in the <a href="https://github.com/MenkeTechnologies/stryke-spark#0x03-cli-spark">README "CLI" section</a>.</p>
+        <p>The full API lives in the <a href="https://github.com/MenkeTechnologies/stryke-spark#0x04-api-reference">README "API reference" section</a>.</p>
       </section>
 
       <section class="tutorial-section">
         <h2>Why a package, not a builtin</h2>
-        <p>Spark Connect splits driver from client; the client speaks gRPC + protobuf. This package wraps that protocol so stryke pipelines can submit SQL or DataFrame operations without bundling the JVM.</p>
-        <p>The stryke side is a thin NDJSON-pipe wrapper; the heavy code lives in the <code>stryke-spark-helper</code> sidecar binary and is loaded on demand. Core stryke is never linked against this package's deps.</p>
+        <p>Spark integration requires the JVM, <code>spark-submit</code>, and PySpark on the host. Most stryke one-liners never touch Spark; for the ones that do, opt in with this package.</p>
+        <p>The stryke side is a thin <code>.stk</code> wrapper that calls <code>spark__*</code> FFI symbols on the cdylib; the heavy code lives in <code>libstryke_spark.{dylib,so}</code>, dlopened in-process on first <code>use Spark</code>. Core stryke is never linked against this package's deps.</p>
       </section>
 
       <section class="tutorial-section">
-        <h2>Helper protocol</h2>
-        <p>The <code>stryke-spark-helper</code> sidecar speaks newline-delimited JSON over stdin/stdout. The stryke library shells out per call and pipes structured data both ways. This keeps stryke startup small while making the package's surface area available on demand.</p>
-<pre># manual invocation (debugging only)
-echo '{"op":"version"}' | stryke-spark-helper</pre>
+        <h2>FFI layer</h2>
+        <p>Each <code>Spark::*</code> wrapper builds a JSON args dict and calls a sibling <code>spark__*</code> symbol resolved out of <code>libstryke_spark.{dylib,so}</code>. The cdylib is dlopened in-process on first <code>use Spark</code>; per call it writes the embedded PySpark driver (<code>src/driver.py</code>, included via <code>include_str!</code>) to a temp file and runs it through <code>spark-submit</code>, passing the JSON request envelope and reading JSON rows back. Each call boots a fresh JVM / <code>SparkSession</code> (~5&ndash;10s warmup); there is no persistent cross-call session daemon in this release. Responses are JSON; errors come back as <code>{"error": "&lt;msg&gt;"}</code> and the wrapper <code>die</code>s with the message.</p>
       </section>
 
       <section class="tutorial-section">
         <h2>Layout</h2>
 <pre>stryke-spark/
-&#9500;&#9472;&#9472; Cargo.toml             # bin = stryke-spark-helper (publish = false)
+&#9500;&#9472;&#9472; Cargo.toml             # cdylib crate manifest (crate-type = ["cdylib"], publish = false)
 &#9500;&#9472;&#9472; src/
-&#9474;   &#9492;&#9472;&#9472; main.rs           # helper binary entry point
-&#9500;&#9472;&#9472; lib/                   # stryke .stk wrapper(s)
-&#9500;&#9472;&#9472; stryke.toml            # stryke package manifest
+&#9474;   &#9500;&#9472;&#9472; lib.rs            # cdylib — spark__* extern "C" exports
+&#9474;   &#9492;&#9472;&#9472; driver.py         # embedded PySpark driver (include_str!)
+&#9500;&#9472;&#9472; lib/                   # stryke .stk wrapper(s) — `use Spark`
+&#9500;&#9472;&#9472; stryke.toml            # stryke package manifest ([ffi] exports table)
 &#9500;&#9472;&#9472; t/                     # zunit-style tests
 &#9500;&#9472;&#9472; examples/              # runnable .stk examples
 &#9500;&#9472;&#9472; Makefile               # `make install` builds + installs
