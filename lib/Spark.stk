@@ -225,3 +225,21 @@ fn Spark::count ($table, $where = undef, %opts) {
         : "SELECT count(*) AS n FROM $table"
     Spark::query_scalar($sql, %opts) + 0
 }
+
+# ── catalog introspection ────────────────────────────────────────────
+
+## List views ({ name, database, is_temp, type }) in the current catalog.
+fn Spark::views (%opts) {
+    @{ Spark::_decode("views", spark__views(to_json(Spark::_req({}, \%opts))))->{rows} }
+}
+
+## List catalogs ({ name, description }).
+fn Spark::catalogs (%opts) {
+    @{ Spark::_decode("catalogs", spark__catalogs(to_json(Spark::_req({}, \%opts))))->{rows} }
+}
+
+## Name of the current database.
+fn Spark::current_database (%opts) {
+    Spark::_decode("current_database",
+        spark__current_database(to_json(Spark::_req({}, \%opts))))->{database}
+}

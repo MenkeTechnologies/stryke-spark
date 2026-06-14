@@ -40,4 +40,9 @@ assert_ok exists &Spark::config, "Spark::config exists"
 assert_ok exists &Spark::submit, "Spark::submit exists"
 assert_ok exists &Spark::count, "Spark::count exists"
 
+# ── Spark.stk catalog introspection ──
+assert_ok exists &Spark::views, "Spark::views exists"
+assert_ok exists &Spark::catalogs, "Spark::catalogs exists"
+assert_ok exists &Spark::current_database, "Spark::current_database exists"
+
 test_run

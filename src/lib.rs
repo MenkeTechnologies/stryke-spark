@@ -300,6 +300,31 @@ fn op_databases(opts: Value) -> Result<Value> {
     Ok(json!({"rows": rows}))
 }
 
+fn op_views(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let req = build_request(&so, json!({"cmd": "views"}));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    Ok(json!({"rows": rows}))
+}
+
+fn op_catalogs(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let req = build_request(&so, json!({"cmd": "catalogs"}));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    Ok(json!({"rows": rows}))
+}
+
+fn op_current_database(opts: Value) -> Result<Value> {
+    let so = SparkOpts::from_value(&opts);
+    let req = build_request(&so, json!({"cmd": "current_database"}));
+    let out = run_driver(&so, req)?;
+    let rows = ndjson_to_rows(&out)?;
+    // Single-row { database } response.
+    Ok(json!({"database": rows.first().and_then(|r| r.get("database")).cloned()}))
+}
+
 fn op_schema(opts: Value) -> Result<Value> {
     let so = SparkOpts::from_value(&opts);
     let table = opts["table"]
@@ -579,6 +604,21 @@ pub extern "C" fn spark__tables(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__databases(args: *const c_char) -> *const c_char {
     ffi_call(args, op_databases)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__views(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_views)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__catalogs(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_catalogs)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__current_database(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_current_database)
 }
 
 #[no_mangle]

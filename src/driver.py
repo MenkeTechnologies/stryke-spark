@@ -203,6 +203,49 @@ def cmd_functions(spark, req):
         })
 
 
+def cmd_views(spark, req):
+    # Views surface through the Catalog API as tables whose tableType is a
+    # VIEW (or that are temporary). Fall back to SHOW VIEWS on clusters where
+    # the catalog API isn't available.
+    try:
+        for t in spark.catalog.listTables():
+            tt = str(getattr(t, "tableType", "") or "")
+            is_temp = getattr(t, "isTemporary", None)
+            if "VIEW" in tt.upper() or is_temp:
+                _out({
+                    "name": t.name,
+                    "database": getattr(t, "database", None) or getattr(t, "namespace", None),
+                    "is_temp": is_temp,
+                    "type": getattr(t, "tableType", None),
+                })
+    except Exception:
+        df = spark.sql("SHOW VIEWS")
+        for row in df.collect():
+            d = row.asDict()
+            _out({
+                "name": d.get("viewName") or d.get("view_name"),
+                "database": d.get("namespace") or d.get("database"),
+                "is_temp": d.get("isTemporary"),
+            })
+
+
+def cmd_catalogs(spark, req):
+    try:
+        for c in spark.catalog.listCatalogs():
+            _out({
+                "name": getattr(c, "name", None),
+                "description": getattr(c, "description", None),
+            })
+    except Exception:
+        df = spark.sql("SHOW CATALOGS")
+        for row in df.collect():
+            _out({"name": row[0]})
+
+
+def cmd_current_database(spark, req):
+    _out({"database": spark.catalog.currentDatabase()})
+
+
 def cmd_columns(spark, req):
     for c in spark.catalog.listColumns(req["table"]):
         _out({
@@ -266,6 +309,9 @@ DISPATCH = {
     "write": cmd_write,
     "tables": cmd_tables,
     "databases": cmd_databases,
+    "views": cmd_views,
+    "catalogs": cmd_catalogs,
+    "current_database": cmd_current_database,
     "schema": cmd_schema,
     "columns": cmd_columns,
     "functions": cmd_functions,
