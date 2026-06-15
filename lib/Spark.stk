@@ -288,3 +288,11 @@ fn Spark::parse_table_name ($name) {
 fn Spark::quote_ident ($name) {
     Spark::_decode("quote_ident", spark__quote_ident(to_json({ name => $name })))->{quoted}
 }
+
+## Quote a qualified table identifier "[catalog.][database.]table" — each part
+## backtick-quoted and rejoined. Splitting is backtick-aware, so a "." inside
+## backticks stays in one part. Returns the quoted string.
+fn Spark::quote_qualified_ident ($name) {
+    Spark::_decode("quote_qualified_ident",
+        spark__quote_qualified_ident(to_json({ name => $name })))->{quoted}
+}

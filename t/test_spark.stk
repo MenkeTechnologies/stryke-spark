@@ -69,4 +69,9 @@ assert_eq $q->{table}, "weird.table", "parse_table_name: quoted dot stays togeth
 
 assert_eq Spark::quote_ident("weird`col"), "`weird``col`", "quote_ident: backticks doubled"
 
+# quote_qualified_ident: each part backtick-quoted, backtick-aware split.
+assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table`", "quote_qualified_ident: three-level namespace"
+assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"
+assert_dies fn { Spark::quote_qualified_ident("a.b.c.d") }, "quote_qualified_ident: rejects over-deep names"
+
 test_run

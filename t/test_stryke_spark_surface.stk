@@ -50,4 +50,10 @@ assert_ok exists &Spark::drop_temp_view, "Spark::drop_temp_view exists"
 assert_ok exists &Spark::set_database, "Spark::set_database exists"
 assert_ok exists &Spark::refresh_table, "Spark::refresh_table exists"
 
+# ── pure helpers (no session) ──
+assert_ok exists &Spark::parse_master_url, "Spark::parse_master_url exists"
+assert_ok exists &Spark::parse_table_name, "Spark::parse_table_name exists"
+assert_ok exists &Spark::quote_ident, "Spark::quote_ident exists"
+assert_ok exists &Spark::quote_qualified_ident, "Spark::quote_qualified_ident exists"
+
 test_run

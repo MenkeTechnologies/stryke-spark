@@ -702,13 +702,45 @@ fn op_parse_table_name(opts: Value) -> Result<Value> {
     Ok(json!({"catalog": catalog, "database": database, "table": table, "parts": parts}))
 }
 
+/// Backtick-quote a single Spark SQL identifier, doubling embedded backticks.
+fn quote_ident_str(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
 /// Quote a Spark SQL identifier with backticks, doubling any embedded backtick.
 fn op_quote_ident(opts: Value) -> Result<Value> {
     let name = opts
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing name"))?;
-    Ok(json!({"quoted": format!("`{}`", name.replace('`', "``"))}))
+    Ok(json!({"quoted": quote_ident_str(name)}))
+}
+
+/// Quote a qualified Spark table identifier `[catalog.][database.]table`,
+/// backtick-quoting each part and rejoining with `.`. Splitting honors backtick
+/// quoting (a `.` inside backticks stays in one part), so it round-trips with
+/// `parse_table_name`. Caps at three parts (catalog.database.table). Pure.
+fn op_quote_qualified_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .or_else(|| opts.get("table"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let parts = split_qualified(name);
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(anyhow!("qualified identifier has an empty part: {name}"));
+    }
+    if parts.len() > 3 {
+        return Err(anyhow!(
+            "too many parts (max catalog.database.table): {name}"
+        ));
+    }
+    let quoted = parts
+        .iter()
+        .map(|p| quote_ident_str(p))
+        .collect::<Vec<_>>()
+        .join(".");
+    Ok(json!({"quoted": quoted, "parts": parts}))
 }
 
 // ── exports ─────────────────────────────────────────────────────────────────
@@ -846,6 +878,11 @@ pub extern "C" fn spark__parse_table_name(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn spark__quote_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__quote_qualified_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_qualified_ident)
 }
 
 #[cfg(test)]
@@ -1703,5 +1740,25 @@ mod tests {
             op_quote_ident(json!({"name": "weird`col"})).unwrap()["quoted"],
             json!("`weird``col`")
         );
+    }
+
+    #[test]
+    fn quote_qualified_ident_backticks_each_part() {
+        // Three-level namespace, each part backtick-quoted.
+        let v = op_quote_qualified_ident(json!({"name": "cat.db.my table"})).unwrap();
+        assert_eq!(v["quoted"], json!("`cat`.`db`.`my table`"));
+        assert_eq!(v["parts"], json!(["cat", "db", "my table"]));
+        // Already-quoted part with an inner dot round-trips through parse_table_name.
+        let q = op_quote_qualified_ident(json!({"name": "db.`weird.table`"})).unwrap();
+        assert_eq!(q["quoted"], json!("`db`.`weird.table`"));
+        let back = op_parse_table_name(json!({"name": q["quoted"].as_str().unwrap()})).unwrap();
+        assert_eq!(back["database"], json!("db"));
+        assert_eq!(back["table"], json!("weird.table"));
+        // Bare name still backticked; over-deep names rejected.
+        assert_eq!(
+            op_quote_qualified_ident(json!({"name": "t"})).unwrap()["quoted"],
+            json!("`t`")
+        );
+        assert!(op_quote_qualified_ident(json!({"name": "a.b.c.d"})).is_err());
     }
 }
