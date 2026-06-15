@@ -284,6 +284,14 @@ fn Spark::parse_table_name ($name) {
     Spark::_decode("parse_table_name", spark__parse_table_name(to_json({ name => $name })))
 }
 
+## Build a qualified table name from parts — inverse of parse_table_name. %opts:
+## table (required), database, catalog (a catalog requires a database). A
+## segment is backtick-quoted only when it contains a "." or backtick, so plain
+## names stay clean and the result round-trips. Returns the name string.
+fn Spark::build_table_name (%opts) {
+    Spark::_decode("build_table_name", spark__build_table_name(to_json(\%opts)))->{name}
+}
+
 ## Quote a Spark SQL identifier with backticks (embedded backticks doubled).
 fn Spark::quote_ident ($name) {
     Spark::_decode("quote_ident", spark__quote_ident(to_json({ name => $name })))->{quoted}

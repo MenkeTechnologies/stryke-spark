@@ -707,6 +707,42 @@ fn quote_ident_str(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
 }
 
+/// Build a qualified table name from parts — the inverse of `parse_table_name`.
+/// opts: `table` (required), and optional `database` and `catalog` (a catalog
+/// requires a database). A segment is backtick-quoted only when it contains a
+/// `.` or backtick (the chars that would break the namespace split), so plain
+/// names stay clean and the result round-trips through `parse_table_name`. Pure.
+fn op_build_table_name(opts: Value) -> Result<Value> {
+    let req = |k: &str| {
+        opts.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    let table = req("table").ok_or_else(|| anyhow!("missing table"))?;
+    let database = req("database");
+    let catalog = req("catalog");
+    if catalog.is_some() && database.is_none() {
+        return Err(anyhow!("catalog requires a database"));
+    }
+    // Quote a segment only if it would otherwise break the dotted split.
+    let seg = |s: &str| {
+        if s.contains('.') || s.contains('`') {
+            quote_ident_str(s)
+        } else {
+            s.to_string()
+        }
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(c) = catalog {
+        parts.push(seg(c));
+    }
+    if let Some(d) = database {
+        parts.push(seg(d));
+    }
+    parts.push(seg(table));
+    Ok(json!({"name": parts.join(".")}))
+}
+
 /// Quote a Spark SQL identifier with backticks, doubling any embedded backtick.
 fn op_quote_ident(opts: Value) -> Result<Value> {
     let name = opts
@@ -873,6 +909,11 @@ pub extern "C" fn spark__parse_master_url(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn spark__parse_table_name(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_table_name)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_table_name(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_table_name)
 }
 
 #[no_mangle]
@@ -1732,6 +1773,38 @@ mod tests {
         // Doubled backtick is a literal backtick.
         let t2 = op_parse_table_name(json!({"name": "`a``b`"})).unwrap();
         assert_eq!(t2["table"], json!("a`b"));
+    }
+
+    #[test]
+    fn build_table_name_inverts_parse_table_name() {
+        // Plain three-level name stays clean (no needless quoting).
+        assert_eq!(
+            op_build_table_name(
+                json!({"catalog": "iceberg", "database": "analytics", "table": "events"})
+            )
+            .unwrap()["name"],
+            json!("iceberg.analytics.events")
+        );
+        // table-only and db.table forms.
+        assert_eq!(
+            op_build_table_name(json!({"table": "events"})).unwrap()["name"],
+            json!("events")
+        );
+        assert_eq!(
+            op_build_table_name(json!({"database": "db", "table": "t"})).unwrap()["name"],
+            json!("db.t")
+        );
+        // A segment with a dot is backtick-quoted so it round-trips through parse.
+        let built = op_build_table_name(json!({"database": "db", "table": "weird.table"})).unwrap()
+            ["name"]
+            .clone();
+        assert_eq!(built, json!("db.`weird.table`"));
+        let back = op_parse_table_name(json!({"name": built})).unwrap();
+        assert_eq!(back["database"], json!("db"));
+        assert_eq!(back["table"], json!("weird.table"));
+        // catalog without database, and missing table, are rejected.
+        assert!(op_build_table_name(json!({"catalog": "c", "table": "t"})).is_err());
+        assert!(op_build_table_name(json!({"database": "db"})).is_err());
     }
 
     #[test]

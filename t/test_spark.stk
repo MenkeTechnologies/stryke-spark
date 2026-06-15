@@ -67,6 +67,12 @@ assert_eq $cdt->{table},    "events",    "parse_table_name: table"
 val $q = Spark::parse_table_name("db.`weird.table`")
 assert_eq $q->{table}, "weird.table", "parse_table_name: quoted dot stays together"
 
+# build_table_name: inverse of parse_table_name, minimal quoting.
+assert_eq Spark::build_table_name(catalog => "iceberg", database => "analytics", table => "events"), "iceberg.analytics.events", "build_table_name: clean three-level name"
+assert_eq Spark::build_table_name(table => "events"), "events", "build_table_name: table only"
+assert_eq Spark::build_table_name(database => "db", table => "weird.table"), "db.`weird.table`", "build_table_name: dotted segment backtick-quoted"
+assert_dies fn { Spark::build_table_name(catalog => "c", table => "t") }, "build_table_name: catalog requires a database"
+
 assert_eq Spark::quote_ident("weird`col"), "`weird``col`", "quote_ident: backticks doubled"
 
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.
