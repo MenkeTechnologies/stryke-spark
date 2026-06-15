@@ -59,6 +59,15 @@ val $k = Spark::parse_master_url("k8s://https://api:6443")
 assert_eq $k->{scheme}, "k8s",                "parse_master_url: k8s scheme"
 assert_eq $k->{master}, "https://api:6443",   "parse_master_url: k8s inner URL"
 
+# build_master_url: inverse of parse_master_url.
+assert_eq Spark::build_master_url(scheme => "local", threads => 8), "local[8]", "build_master_url: local[8]"
+assert_eq Spark::build_master_url(scheme => "local", threads => 1), "local", "build_master_url: 1 thread → bare local"
+assert_eq Spark::build_master_url(scheme => "spark", hosts => [{ host => "m1", port => 7077 }, { host => "m2", port => 7077 }]), "spark://m1:7077,m2:7077", "build_master_url: standalone HA"
+assert_eq Spark::build_master_url(scheme => "k8s", master => "https://api:6443"), "k8s://https://api:6443", "build_master_url: k8s inner URL"
+# round-trips parse_master_url.
+assert_eq Spark::build_master_url(%{ Spark::parse_master_url("local[*]") }), "local[*]", "build_master_url: round-trips local[*]"
+assert_dies fn { Spark::build_master_url(scheme => "mesos") }, "build_master_url: scheme needing master errors without one"
+
 val $cdt = Spark::parse_table_name("iceberg.analytics.events")
 assert_eq $cdt->{catalog},  "iceberg",   "parse_table_name: catalog"
 assert_eq $cdt->{database}, "analytics", "parse_table_name: database"

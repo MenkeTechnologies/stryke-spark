@@ -654,6 +654,64 @@ fn op_parse_master_url(opts: Value) -> Result<Value> {
     }
 }
 
+/// Build a Spark master URL from parts — the inverse of `parse_master_url`.
+/// opts: `scheme` (required). `local` honors `threads` (a count, or `"*"`; 1 or
+/// absent yields the bare `local`); `spark` joins `hosts` (`[{host, port?}]`)
+/// into `spark://h1:p1,h2`; `yarn` is the bare word; any other scheme needs a
+/// `master` string and yields `scheme://master`. Returns `{url}`. Pure.
+fn op_build_master_url(opts: Value) -> Result<Value> {
+    let scheme = opts
+        .get("scheme")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing scheme"))?;
+    let url = match scheme {
+        "local" => match opts.get("threads") {
+            Some(Value::String(s)) if s == "*" => "local[*]".to_string(),
+            Some(Value::Number(n)) => {
+                let t = n.as_u64().ok_or_else(|| anyhow!("invalid thread count"))?;
+                if t <= 1 {
+                    "local".to_string()
+                } else {
+                    format!("local[{t}]")
+                }
+            }
+            None => "local".to_string(),
+            Some(other) => return Err(anyhow!("invalid threads value: {other}")),
+        },
+        "yarn" => "yarn".to_string(),
+        "spark" => {
+            let hosts = opts
+                .get("hosts")
+                .and_then(Value::as_array)
+                .filter(|h| !h.is_empty())
+                .ok_or_else(|| anyhow!("spark scheme requires a non-empty hosts list"))?;
+            let parts: Result<Vec<String>> = hosts
+                .iter()
+                .map(|h| {
+                    let host = h
+                        .get("host")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| anyhow!("host entry missing `host`"))?;
+                    match h.get("port").and_then(Value::as_u64) {
+                        Some(port) => Ok(format!("{host}:{port}")),
+                        None => Ok(host.to_string()),
+                    }
+                })
+                .collect();
+            format!("spark://{}", parts?.join(","))
+        }
+        other => {
+            let master = opts
+                .get("master")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("`{other}` scheme requires a master address"))?;
+            format!("{other}://{master}")
+        }
+    };
+    Ok(json!({ "url": url }))
+}
+
 /// Split a possibly-backtick-quoted dotted identifier, treating `.` inside
 /// backticks as literal and `` `` `` (doubled) as an escaped backtick.
 fn split_qualified(s: &str) -> Vec<String> {
@@ -904,6 +962,11 @@ pub extern "C" fn spark__config(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__parse_master_url(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_master_url)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_master_url(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_master_url)
 }
 
 #[no_mangle]
@@ -1743,6 +1806,46 @@ mod tests {
             json!("https://api:6443"),
             "k8s keeps the full inner URL"
         );
+    }
+
+    #[test]
+    fn build_master_url_inverts_parse_master_url() {
+        // local thread forms: 1/absent → bare, N>1 → local[N], "*" → local[*].
+        assert_eq!(
+            op_build_master_url(json!({"scheme": "local"})).unwrap()["url"],
+            json!("local")
+        );
+        assert_eq!(
+            op_build_master_url(json!({"scheme": "local", "threads": 1})).unwrap()["url"],
+            json!("local")
+        );
+        assert_eq!(
+            op_build_master_url(json!({"scheme": "local", "threads": 8})).unwrap()["url"],
+            json!("local[8]")
+        );
+        assert_eq!(
+            op_build_master_url(json!({"scheme": "local", "threads": "*"})).unwrap()["url"],
+            json!("local[*]")
+        );
+        // Round-trips the canonical forms through parse_master_url.
+        for url in [
+            "local",
+            "local[8]",
+            "local[*]",
+            "yarn",
+            "spark://m1:7077",
+            "spark://m1:7077,m2:7077",
+            "mesos://host:5050",
+            "k8s://https://api:6443",
+        ] {
+            let parsed = op_parse_master_url(json!({ "url": url })).unwrap();
+            let rebuilt = op_build_master_url(parsed).unwrap()["url"].clone();
+            assert_eq!(rebuilt, json!(url), "round-trip for {url}");
+        }
+        // Error cases: empty spark hosts, missing master, missing scheme.
+        assert!(op_build_master_url(json!({"scheme": "spark", "hosts": []})).is_err());
+        assert!(op_build_master_url(json!({"scheme": "mesos"})).is_err());
+        assert!(op_build_master_url(json!({})).is_err());
     }
 
     #[test]
