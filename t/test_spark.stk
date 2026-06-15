@@ -92,6 +92,15 @@ assert_eq Spark::parse_memory("2GiB")->{bytes}, 2147483648, "parse_memory: 2GiB 
 assert_eq Spark::parse_memory("4096")->{bytes}, 4096, "parse_memory: no suffix is bytes"
 assert_dies fn { Spark::parse_memory("10x") }, "parse_memory: rejects an unknown suffix"
 
+# build_memory: inverse — encode bytes as a Spark size string.
+assert_eq Spark::build_memory(0)->{string},          "0b",     "build_memory: zero is 0b"
+assert_eq Spark::build_memory(2147483648)->{string}, "2g",     "build_memory: 2 GiB collapses to 2g"
+assert_eq Spark::build_memory(1610612736)->{string}, "1536m",  "build_memory: 1.5 GiB drops to 1536m"
+assert_eq Spark::build_memory(1234)->{string},       "1234b",  "build_memory: non-power-of-1024 falls to bytes"
+assert_eq Spark::build_memory(1099511627776)->{string}, "1t",  "build_memory: largest unit wins (1 TiB → 1t)"
+assert_eq Spark::parse_memory(Spark::build_memory(536870912)->{string})->{bytes}, 536870912, "build_memory: round-trips through parse_memory"
+assert_dies fn { Spark::build_memory() }, "build_memory: requires bytes"
+
 assert_eq Spark::quote_ident("weird`col"), "`weird``col`", "quote_ident: backticks doubled"
 
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.

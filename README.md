@@ -212,6 +212,7 @@ Spark::build_master_url(%opts)  → $url   # { scheme, threads|hosts|master } �
 Spark::parse_table_name($name)  → { catalog, database, table, parts }     # backtick-aware catalog.db.table
 Spark::build_table_name(%opts)  → $name                                   # catalog/database/table → dotted name; inverse of parse_table_name
 Spark::parse_memory($memory)    → { value, suffix, bytes, mib }           # Spark size config 512m/2g/1kb → bytes (binary suffixes: 1kb=1024)
+Spark::build_memory($bytes)     → { value, suffix, string, bytes }        # bytes → Spark size string (largest binary unit that divides evenly); inverse of parse_memory
 Spark::quote_ident($name)       → $quoted                                 # `weird``col`
 Spark::quote_qualified_ident($name) → $quoted                            # cat.db.my table → `cat`.`db`.`my table`
 ```

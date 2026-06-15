@@ -841,6 +841,42 @@ fn op_parse_memory(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Encode a byte count as a Spark size string — the inverse of `parse_memory`.
+/// Picks the largest binary unit (P→T→G→M→K→B) that divides the byte count
+/// evenly, so `parse_memory` round-trips it exactly; `0` gives `"0b"`. Emits the
+/// short lowercase suffix Spark config accepts (e.g. `spark.executor.memory`).
+/// opts: `bytes` (required). Returns `{value, suffix, string, bytes}`. Pure.
+fn op_build_memory(opts: Value) -> Result<Value> {
+    let bytes = opts
+        .get("bytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing bytes"))?;
+    if bytes == 0 {
+        return Ok(json!({"value": 0, "suffix": "b", "string": "0b", "bytes": 0}));
+    }
+    // Largest unit first; the first that divides evenly wins.
+    let units: [(u64, &str); 6] = [
+        (1024u64.pow(5), "p"),
+        (1024u64.pow(4), "t"),
+        (1024u64.pow(3), "g"),
+        (1024u64.pow(2), "m"),
+        (1024, "k"),
+        (1, "b"),
+    ];
+    for (mult, suffix) in units {
+        if bytes.is_multiple_of(mult) {
+            let value = bytes / mult;
+            return Ok(json!({
+                "value": value,
+                "suffix": suffix,
+                "string": format!("{value}{suffix}"),
+                "bytes": bytes,
+            }));
+        }
+    }
+    unreachable!("the 1-byte unit divides every count")
+}
+
 /// Quote a Spark SQL identifier with backticks, doubling any embedded backtick.
 fn op_quote_ident(opts: Value) -> Result<Value> {
     let name = opts
@@ -1022,6 +1058,11 @@ pub extern "C" fn spark__build_table_name(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn spark__parse_memory(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_memory)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_memory(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_memory)
 }
 
 #[no_mangle]
@@ -1928,6 +1969,47 @@ mod tests {
         assert!(op_parse_memory(json!({"memory": "g"})).is_err());
         assert!(op_parse_memory(json!({"memory": "10x"})).is_err());
         assert!(op_parse_memory(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_memory_picks_largest_dividing_unit_and_round_trips() {
+        // 0 → "0b".
+        assert_eq!(
+            op_build_memory(json!({"bytes": 0})).unwrap()["string"],
+            json!("0b")
+        );
+        // Even GiB collapses to the gigabyte unit.
+        let g = op_build_memory(json!({"bytes": 2_147_483_648u64})).unwrap();
+        assert_eq!(g["string"], json!("2g"));
+        assert_eq!(g["suffix"], json!("g"));
+        // 1.5 GiB isn't a whole number of GiB, so it drops to MiB (1536m).
+        assert_eq!(
+            op_build_memory(json!({"bytes": 1_610_612_736u64})).unwrap()["string"],
+            json!("1536m")
+        );
+        // A non-power-of-1024 count falls through to plain bytes.
+        assert_eq!(
+            op_build_memory(json!({"bytes": 1234})).unwrap()["string"],
+            json!("1234b")
+        );
+        // Largest unit wins: exactly 1 TiB is "1t", not "1024g".
+        assert_eq!(
+            op_build_memory(json!({"bytes": 1_099_511_627_776u64})).unwrap()["string"],
+            json!("1t")
+        );
+        // Round-trips through parse_memory for every produced string.
+        for bytes in [1234u64, 1024, 536_870_912, 2_147_483_648, 1_610_612_736] {
+            let s = op_build_memory(json!({ "bytes": bytes })).unwrap()["string"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                op_parse_memory(json!({ "memory": s })).unwrap()["bytes"],
+                json!(bytes),
+                "round-trip {bytes}"
+            );
+        }
+        assert!(op_build_memory(json!({})).is_err());
     }
 
     #[test]
