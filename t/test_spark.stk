@@ -82,6 +82,16 @@ assert_eq Spark::build_table_name(table => "events"), "events", "build_table_nam
 assert_eq Spark::build_table_name(database => "db", table => "weird.table"), "db.`weird.table`", "build_table_name: dotted segment backtick-quoted"
 assert_dies fn { Spark::build_table_name(catalog => "c", table => "t") }, "build_table_name: catalog requires a database"
 
+# parse_memory: Spark byte-string size config (binary suffixes).
+val $mem = Spark::parse_memory("512m")
+assert_eq $mem->{bytes}, 536870912, "parse_memory: 512m = 512 MiB in bytes"
+assert_eq $mem->{mib},   512,        "parse_memory: 512m = 512 MiB"
+assert_eq Spark::parse_memory("1kb")->{bytes}, 1024, "parse_memory: Spark kb is 1024 bytes (binary)"
+assert_eq Spark::parse_memory("2g")->{bytes}, 2147483648, "parse_memory: 2g = 2 GiB"
+assert_eq Spark::parse_memory("2GiB")->{bytes}, 2147483648, "parse_memory: 2GiB agrees with 2g (case-insensitive)"
+assert_eq Spark::parse_memory("4096")->{bytes}, 4096, "parse_memory: no suffix is bytes"
+assert_dies fn { Spark::parse_memory("10x") }, "parse_memory: rejects an unknown suffix"
+
 assert_eq Spark::quote_ident("weird`col"), "`weird``col`", "quote_ident: backticks doubled"
 
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.

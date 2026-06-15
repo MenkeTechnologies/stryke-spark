@@ -801,6 +801,46 @@ fn op_build_table_name(opts: Value) -> Result<Value> {
     Ok(json!({"name": parts.join(".")}))
 }
 
+/// Parse a Spark memory/size config string (`512m`, `2g`, `1024kb`) into bytes.
+/// Spark's `JavaUtils.byteStringAsBytes` treats every suffix as BINARY —
+/// `1k`/`1kb`/`1ki`/`1kib` all mean 1024 bytes, not 1000 — and is
+/// case-insensitive; no suffix means bytes. opts: `memory` (required). Returns
+/// `{value, suffix, bytes, mib}`; errors on an unknown suffix or u64 overflow.
+/// Pure.
+fn op_parse_memory(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("memory")
+        .or_else(|| opts.get("size"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing memory"))?;
+    let s = raw.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, suffix) = s.split_at(split);
+    if num.is_empty() {
+        return Err(anyhow!("Spark size `{s}` has no numeric value"));
+    }
+    let value: u64 = num.parse()?;
+    let suffix = suffix.to_ascii_lowercase();
+    let mult: u64 = match suffix.as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "ki" | "kib" => 1024,
+        "m" | "mb" | "mi" | "mib" => 1024u64.pow(2),
+        "g" | "gb" | "gi" | "gib" => 1024u64.pow(3),
+        "t" | "tb" | "ti" | "tib" => 1024u64.pow(4),
+        "p" | "pb" | "pi" | "pib" => 1024u64.pow(5),
+        other => return Err(anyhow!("unknown Spark size suffix `{other}`")),
+    };
+    let bytes = value
+        .checked_mul(mult)
+        .ok_or_else(|| anyhow!("size overflows u64 bytes: `{s}`"))?;
+    Ok(json!({
+        "value": value,
+        "suffix": suffix,
+        "bytes": bytes,
+        "mib": bytes as f64 / (1024.0 * 1024.0),
+    }))
+}
+
 /// Quote a Spark SQL identifier with backticks, doubling any embedded backtick.
 fn op_quote_ident(opts: Value) -> Result<Value> {
     let name = opts
@@ -977,6 +1017,11 @@ pub extern "C" fn spark__parse_table_name(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn spark__build_table_name(args: *const c_char) -> *const c_char {
     ffi_call(args, op_build_table_name)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_memory(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_memory)
 }
 
 #[no_mangle]
@@ -1846,6 +1891,43 @@ mod tests {
         assert!(op_build_master_url(json!({"scheme": "spark", "hosts": []})).is_err());
         assert!(op_build_master_url(json!({"scheme": "mesos"})).is_err());
         assert!(op_build_master_url(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_memory_uses_binary_suffixes() {
+        // 512m = 512 * 1024^2 bytes; the suffix is binary, not decimal.
+        let m = op_parse_memory(json!({"memory": "512m"})).unwrap();
+        assert_eq!(m["value"], json!(512));
+        assert_eq!(m["bytes"], json!(536_870_912u64));
+        assert_eq!(m["mib"], json!(512.0));
+        // Spark treats `kb` as KiB (1024), NOT 1000.
+        assert_eq!(
+            op_parse_memory(json!({"memory": "1kb"})).unwrap()["bytes"],
+            json!(1024),
+            "kb is 1024 bytes in Spark"
+        );
+        // Case-insensitive, and `gib`/`g`/`gb` all agree.
+        for s in ["2g", "2G", "2gb", "2GiB"] {
+            assert_eq!(
+                op_parse_memory(json!({ "memory": s })).unwrap()["bytes"],
+                json!(2_147_483_648u64),
+                "{s} = 2 GiB"
+            );
+        }
+        // No suffix is bytes.
+        assert_eq!(
+            op_parse_memory(json!({"memory": "4096"})).unwrap()["bytes"],
+            json!(4096)
+        );
+        // Every magnitude.
+        assert_eq!(
+            op_parse_memory(json!({"memory": "1t"})).unwrap()["bytes"],
+            json!(1_099_511_627_776u64)
+        );
+        // No numeric value and an unknown suffix reject.
+        assert!(op_parse_memory(json!({"memory": "g"})).is_err());
+        assert!(op_parse_memory(json!({"memory": "10x"})).is_err());
+        assert!(op_parse_memory(json!({})).is_err());
     }
 
     #[test]

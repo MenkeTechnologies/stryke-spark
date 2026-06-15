@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "stryke-spark"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "once_cell",

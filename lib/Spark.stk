@@ -299,6 +299,13 @@ fn Spark::build_table_name (%opts) {
     Spark::_decode("build_table_name", spark__build_table_name(to_json(\%opts)))->{name}
 }
 
+## Parse a Spark memory/size config string ("512m", "2g", "1024kb") into a
+## hashref { value, suffix, bytes, mib }. Spark's suffixes are binary
+## (1kb = 1024 bytes), case-insensitive; no suffix means bytes.
+fn Spark::parse_memory ($memory) {
+    Spark::_decode("parse_memory", spark__parse_memory(to_json({ memory => $memory })))
+}
+
 ## Quote a Spark SQL identifier with backticks (embedded backticks doubled).
 fn Spark::quote_ident ($name) {
     Spark::_decode("quote_ident", spark__quote_ident(to_json({ name => $name })))->{quoted}
