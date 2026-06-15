@@ -204,6 +204,14 @@ Spark::uncache  $table, %opts → { ok, uncached }
 Spark::config   $key, %opts → $value | { ok }   # set with value => ...
 ```
 
+### Pure helpers (no Spark)
+
+```stryke
+Spark::parse_master_url($url)   → { scheme, threads?, hosts?, master? }   # local[N], spark://… HA, k8s://…, yarn
+Spark::parse_table_name($name)  → { catalog, database, table, parts }     # backtick-aware catalog.db.table
+Spark::quote_ident($name)       → $quoted                                 # `weird``col`
+```
+
 ### Submit pass-through
 
 ```stryke

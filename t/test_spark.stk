@@ -49,4 +49,24 @@ if ($alive) {
     assert_ok $found_default, "databases: contains 'default'"
 }
 
+# ── pure helpers (no Spark — always run) ─────────────────────────────
+assert_eq Spark::parse_master_url("local[8]")->{threads}, 8, "parse_master_url: local thread count"
+assert_eq Spark::parse_master_url("local[*]")->{threads}, "*", "parse_master_url: all cores"
+val $ha = Spark::parse_master_url("spark://m1:7077,m2:7077")
+assert_eq scalar(@{ $ha->{hosts} }), 2, "parse_master_url: HA host list"
+assert_eq $ha->{hosts}[0]{port}, 7077, "parse_master_url: standalone port"
+val $k = Spark::parse_master_url("k8s://https://api:6443")
+assert_eq $k->{scheme}, "k8s",                "parse_master_url: k8s scheme"
+assert_eq $k->{master}, "https://api:6443",   "parse_master_url: k8s inner URL"
+
+val $cdt = Spark::parse_table_name("iceberg.analytics.events")
+assert_eq $cdt->{catalog},  "iceberg",   "parse_table_name: catalog"
+assert_eq $cdt->{database}, "analytics", "parse_table_name: database"
+assert_eq $cdt->{table},    "events",    "parse_table_name: table"
+# backtick-quoted dotted name stays in one part
+val $q = Spark::parse_table_name("db.`weird.table`")
+assert_eq $q->{table}, "weird.table", "parse_table_name: quoted dot stays together"
+
+assert_eq Spark::quote_ident("weird`col"), "`weird``col`", "quote_ident: backticks doubled"
+
 test_run

@@ -269,3 +269,22 @@ fn Spark::refresh_table ($table, %opts) {
     val $r = Spark::_req({ table => $table }, \%opts)
     Spark::_decode("refresh_table", spark__refresh_table(to_json($r)))
 }
+
+# ── pure helpers (no Spark) ───────────────────────────────────────────
+
+## Parse a Spark master URL (local, local[N], local[*], yarn, spark://… HA,
+## k8s://…, mesos://…) into a hashref { scheme, threads?, hosts?, master? }.
+fn Spark::parse_master_url ($url) {
+    Spark::_decode("parse_master_url", spark__parse_master_url(to_json({ url => $url })))
+}
+
+## Parse a table identifier "[catalog.][database.]table" (Spark 3 three-level
+## namespace, backtick-aware) into { catalog, database, table, parts }.
+fn Spark::parse_table_name ($name) {
+    Spark::_decode("parse_table_name", spark__parse_table_name(to_json({ name => $name })))
+}
+
+## Quote a Spark SQL identifier with backticks (embedded backticks doubled).
+fn Spark::quote_ident ($name) {
+    Spark::_decode("quote_ident", spark__quote_ident(to_json({ name => $name })))->{quoted}
+}

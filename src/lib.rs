@@ -604,6 +604,113 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
     drop(CString::from_raw(p));
 }
 
+// ── pure helpers (no Spark) ──────────────────────────────────────────────────
+
+/// Parse a Spark master URL into its parts. Handles `local`, `local[N]`,
+/// `local[*]`, `yarn`, `spark://host:port[,host:port]` (standalone HA), and
+/// scheme-prefixed forms (`k8s://…`, `mesos://…`). Pure.
+fn op_parse_master_url(opts: Value) -> Result<Value> {
+    let url = opts
+        .get("url")
+        .or_else(|| opts.get("master"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing url"))?;
+    if url == "local" {
+        return Ok(json!({"scheme": "local", "threads": 1}));
+    }
+    if let Some(inner) = url.strip_prefix("local[").and_then(|s| s.strip_suffix(']')) {
+        let threads = if inner == "*" {
+            json!("*")
+        } else {
+            inner
+                .parse::<u32>()
+                .map(|n| json!(n))
+                .map_err(|_| anyhow!("invalid local thread count `{inner}`"))?
+        };
+        return Ok(json!({"scheme": "local", "threads": threads}));
+    }
+    if url == "yarn" {
+        return Ok(json!({"scheme": "yarn"}));
+    }
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| anyhow!("not a Spark master URL: {url}"))?;
+    match scheme {
+        "spark" => {
+            let hosts: Vec<Value> = rest
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|hp| match hp.rsplit_once(':') {
+                    Some((h, p)) => match p.parse::<u32>() {
+                        Ok(port) => json!({"host": h, "port": port}),
+                        Err(_) => json!({"host": hp, "port": Value::Null}),
+                    },
+                    None => json!({"host": hp, "port": Value::Null}),
+                })
+                .collect();
+            Ok(json!({"scheme": "spark", "hosts": hosts}))
+        }
+        other => Ok(json!({"scheme": other, "master": rest})),
+    }
+}
+
+/// Split a possibly-backtick-quoted dotted identifier, treating `.` inside
+/// backticks as literal and `` `` `` (doubled) as an escaped backtick.
+fn split_qualified(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_tick = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '`' => {
+                if in_tick && chars.peek() == Some(&'`') {
+                    cur.push('`');
+                    chars.next();
+                } else {
+                    in_tick = !in_tick;
+                }
+            }
+            '.' if !in_tick => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// Parse a Spark table identifier `[catalog.][database.]table` (Spark 3
+/// three-level namespace) into `{catalog, database, table, parts}`. Backtick
+/// quoting is honored, so a `.` inside backticks stays in one part. Pure.
+fn op_parse_table_name(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .or_else(|| opts.get("table"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let parts = split_qualified(name);
+    let (catalog, database, table) = match parts.len() {
+        1 => (Value::Null, Value::Null, json!(parts[0])),
+        2 => (Value::Null, json!(parts[0]), json!(parts[1])),
+        3 => (json!(parts[0]), json!(parts[1]), json!(parts[2])),
+        _ => {
+            return Err(anyhow!(
+                "too many parts (max catalog.database.table): {name}"
+            ))
+        }
+    };
+    Ok(json!({"catalog": catalog, "database": database, "table": table, "parts": parts}))
+}
+
+/// Quote a Spark SQL identifier with backticks, doubling any embedded backtick.
+fn op_quote_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    Ok(json!({"quoted": format!("`{}`", name.replace('`', "``"))}))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -724,6 +831,21 @@ pub extern "C" fn spark__uncache(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__config(args: *const c_char) -> *const c_char {
     ffi_call(args, op_config)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_master_url(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_master_url)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_table_name(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_table_name)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__quote_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_ident)
 }
 
 #[cfg(test)]
@@ -1504,5 +1626,82 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ── pure helpers (no Spark) ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_master_url_local_forms() {
+        assert_eq!(
+            op_parse_master_url(json!({"url": "local"})).unwrap(),
+            json!({"scheme": "local", "threads": 1})
+        );
+        assert_eq!(
+            op_parse_master_url(json!({"url": "local[8]"})).unwrap()["threads"],
+            json!(8)
+        );
+        assert_eq!(
+            op_parse_master_url(json!({"url": "local[*]"})).unwrap()["threads"],
+            json!("*")
+        );
+        assert!(op_parse_master_url(json!({"url": "local[x]"})).is_err());
+    }
+
+    #[test]
+    fn parse_master_url_standalone_and_scheme_forms() {
+        let ha = op_parse_master_url(json!({"url": "spark://m1:7077,m2:7077"})).unwrap();
+        let hosts = ha["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 2, "standalone HA host list");
+        assert_eq!(hosts[0]["host"], json!("m1"));
+        assert_eq!(hosts[0]["port"], json!(7077));
+        assert_eq!(
+            op_parse_master_url(json!({"url": "yarn"})).unwrap()["scheme"],
+            json!("yarn")
+        );
+        let k8s = op_parse_master_url(json!({"url": "k8s://https://api:6443"})).unwrap();
+        assert_eq!(k8s["scheme"], json!("k8s"));
+        assert_eq!(
+            k8s["master"],
+            json!("https://api:6443"),
+            "k8s keeps the full inner URL"
+        );
+    }
+
+    #[test]
+    fn parse_table_name_one_two_three_parts() {
+        let t = op_parse_table_name(json!({"name": "events"})).unwrap();
+        assert_eq!(t["table"], json!("events"));
+        assert_eq!(t["database"], Value::Null);
+        let dt = op_parse_table_name(json!({"name": "analytics.events"})).unwrap();
+        assert_eq!(dt["database"], json!("analytics"));
+        assert_eq!(dt["table"], json!("events"));
+        let cdt = op_parse_table_name(json!({"name": "iceberg.analytics.events"})).unwrap();
+        assert_eq!(cdt["catalog"], json!("iceberg"));
+        assert_eq!(cdt["database"], json!("analytics"));
+        assert_eq!(cdt["table"], json!("events"));
+        assert!(op_parse_table_name(json!({"name": "a.b.c.d"})).is_err());
+    }
+
+    #[test]
+    fn parse_table_name_honors_backtick_quoting() {
+        // A `.` inside backticks is part of the name, not a separator.
+        let t = op_parse_table_name(json!({"name": "db.`weird.table`"})).unwrap();
+        assert_eq!(t["database"], json!("db"));
+        assert_eq!(
+            t["table"],
+            json!("weird.table"),
+            "dotted quoted name stays together"
+        );
+        // Doubled backtick is a literal backtick.
+        let t2 = op_parse_table_name(json!({"name": "`a``b`"})).unwrap();
+        assert_eq!(t2["table"], json!("a`b"));
+    }
+
+    #[test]
+    fn quote_ident_doubles_backticks() {
+        assert_eq!(
+            op_quote_ident(json!({"name": "weird`col"})).unwrap()["quoted"],
+            json!("`weird``col`")
+        );
     }
 }
