@@ -332,3 +332,11 @@ fn Spark::quote_qualified_ident ($name) {
     Spark::_decode("quote_qualified_ident",
         spark__quote_qualified_ident(to_json({ name => $name })))->{quoted}
 }
+
+## Spark's quoteIfNeeded: backtick-quote $name only when it is not already a
+## bare-legal identifier (^[a-zA-Z_][a-zA-Z0-9_]*$), otherwise return it as-is —
+## unlike quote_ident, which always wraps. Returns the (maybe-quoted) string.
+fn Spark::quote_ident_if_needed ($name) {
+    Spark::_decode("quote_ident_if_needed",
+        spark__quote_ident_if_needed(to_json({ name => $name })))->{quoted}
+}

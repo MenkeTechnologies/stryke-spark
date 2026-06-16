@@ -114,4 +114,11 @@ assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table
 assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"
 assert_dies fn { Spark::quote_qualified_ident("a.b.c.d") }, "quote_qualified_ident: rejects over-deep names"
 
+# quote_ident_if_needed: Spark quoteIfNeeded — quote only when not bare-legal.
+assert_eq Spark::quote_ident_if_needed("users"), "users", "quote_ident_if_needed: bare-legal name untouched"
+assert_eq Spark::quote_ident_if_needed("_tmp"),  "_tmp",  "quote_ident_if_needed: leading underscore is bare-legal"
+assert_eq Spark::quote_ident_if_needed("1col"),  "`1col`", "quote_ident_if_needed: leading digit forces quoting"
+assert_eq Spark::quote_ident_if_needed("my col"), "`my col`", "quote_ident_if_needed: space forces quoting"
+assert_eq Spark::quote_ident_if_needed("a.b"),   "`a.b`",  "quote_ident_if_needed: dot forces quoting"
+
 test_run

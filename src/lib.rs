@@ -765,6 +765,19 @@ fn quote_ident_str(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
 }
 
+/// Spark's `QuotingUtils.needQuote`: a part is a bare identifier (no quoting)
+/// iff it matches `^[a-zA-Z_][a-zA-Z0-9_]*` in full (Java `matches()` anchors
+/// both ends) — a leading ASCII letter or underscore, then ASCII alphanumerics
+/// or underscores. Empty, leading digit, or any other char forces quoting.
+fn spark_needs_quote(part: &str) -> bool {
+    let mut chars = part.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return true,
+    }
+    !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Build a qualified table name from parts — the inverse of `parse_table_name`.
 /// opts: `table` (required), and optional `database` and `catalog` (a catalog
 /// requires a database). A segment is backtick-quoted only when it contains a
@@ -937,6 +950,26 @@ fn op_quote_qualified_ident(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quoted, "parts": parts}))
 }
 
+/// Spark's `QuotingUtils.quoteIfNeeded`: backtick-quote an identifier ONLY when
+/// it is not already a bare-legal name, otherwise return it untouched — distinct
+/// from `quote_ident`, which always wraps. This is what Spark uses when emitting
+/// SQL so plain names like `users` stay unquoted while `1col`/`my col`/`a.b`
+/// become `` `1col` ``/`` `my col` ``/`` `a.b` ``. opts: `name` (required).
+/// Returns `{name, quoted, needs_quote}`. Pure.
+fn op_quote_ident_if_needed(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let needs = spark_needs_quote(name);
+    let quoted = if needs {
+        quote_ident_str(name)
+    } else {
+        name.to_string()
+    };
+    Ok(json!({"name": name, "quoted": quoted, "needs_quote": needs}))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1102,6 +1135,11 @@ pub extern "C" fn spark__unquote_ident(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__quote_qualified_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_qualified_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__quote_ident_if_needed(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_ident_if_needed)
 }
 
 #[cfg(test)]
@@ -2160,5 +2198,31 @@ mod tests {
             json!("`t`")
         );
         assert!(op_quote_qualified_ident(json!({"name": "a.b.c.d"})).is_err());
+    }
+
+    #[test]
+    fn quote_ident_if_needed_matches_spark_quoteifneeded() {
+        let chk = |n: &str| op_quote_ident_if_needed(json!({ "name": n })).unwrap();
+        // Bare-legal names (^[a-zA-Z_][a-zA-Z0-9_]*$) pass through untouched.
+        for ok in ["users", "_tmp", "user1", "a", "A_b_2", "_"] {
+            let v = chk(ok);
+            assert_eq!(v["needs_quote"], json!(false), "`{ok}` is bare-legal");
+            assert_eq!(v["quoted"], json!(ok), "`{ok}` passes through");
+        }
+        // Leading digit, empty, space, dot, and non-ASCII all force quoting.
+        assert_eq!(chk("1user")["quoted"], json!("`1user`"));
+        assert_eq!(chk("")["needs_quote"], json!(true));
+        assert_eq!(chk("")["quoted"], json!("``"));
+        assert_eq!(chk("my col")["quoted"], json!("`my col`"));
+        assert_eq!(chk("a.b")["quoted"], json!("`a.b`"));
+        assert_eq!(chk("naïve")["quoted"], json!("`naïve`")); // ï is not ASCII alnum
+                                                              // Embedded backtick is doubled inside the quotes.
+        assert_eq!(chk("has`tick")["quoted"], json!("`has``tick`"));
+        // Contrast with quote_ident, which ALWAYS wraps even a bare-legal name.
+        assert_eq!(
+            op_quote_ident(json!({"name": "users"})).unwrap()["quoted"],
+            json!("`users`")
+        );
+        assert!(op_quote_ident_if_needed(json!({})).is_err());
     }
 }

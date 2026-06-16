@@ -216,6 +216,7 @@ Spark::build_memory($bytes)     → { value, suffix, string, bytes }        # by
 Spark::quote_ident($name)       → $quoted                                 # `weird``col`
 Spark::unquote_ident($quoted)   → $name                                   # inverse of quote_ident: strip backticks, un-double
 Spark::quote_qualified_ident($name) → $quoted                            # cat.db.my table → `cat`.`db`.`my table`
+Spark::quote_ident_if_needed($name) → $quoted                            # Spark quoteIfNeeded: users → users, 1col → `1col` (quote only when not bare-legal)
 ```
 
 ### Submit pass-through
