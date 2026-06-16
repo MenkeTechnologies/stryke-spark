@@ -221,6 +221,7 @@ Spark::unquote_literal($quoted) → $value                                  # in
 Spark::quote_qualified_ident($name) → $quoted                            # cat.db.my table → `cat`.`db`.`my table`
 Spark::parse_qualified_ident($name) → { name, parts, count }             # inverse: `cat`.`my db`.`tbl` → ["cat","my db","tbl"]; dot inside backticks stays literal
 Spark::quote_ident_if_needed($name) → $quoted                            # Spark quoteIfNeeded: users → users, 1col → `1col` (quote only when not bare-legal)
+Spark::escape_like($value)          → $escaped                           # backslash-escape Spark LIKE wildcards: 100% → 100\%, a_b → a\_b, \ → \\
 ```
 
 ### Submit pass-through

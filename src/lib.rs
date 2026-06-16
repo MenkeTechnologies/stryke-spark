@@ -1149,6 +1149,24 @@ fn op_quote_ident_if_needed(opts: Value) -> Result<Value> {
     Ok(json!({"name": name, "quoted": quoted, "needs_quote": needs}))
 }
 
+/// Escape a literal string for a Spark SQL `LIKE` pattern: the wildcards `%`
+/// (zero+ chars) and `_` (one char) and the default escape char `\` are each
+/// backslash-escaped, so `value` matches itself exactly (e.g.
+/// `col LIKE escape_like(s) || '%'` for a prefix match). The backslash is doubled
+/// first so the `%`/`_` escapes it adds aren't themselves re-escaped. opts:
+/// `value` (required). Returns `{value, escaped}`. Pure.
+fn op_escape_like(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    Ok(json!({ "value": value, "escaped": escaped }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1334,6 +1352,11 @@ pub extern "C" fn spark__parse_qualified_ident(args: *const c_char) -> *const c_
 #[no_mangle]
 pub extern "C" fn spark__quote_ident_if_needed(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_ident_if_needed)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__escape_like(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_escape_like)
 }
 
 #[cfg(test)]
@@ -2505,5 +2528,26 @@ mod tests {
             json!("`users`")
         );
         assert!(op_quote_ident_if_needed(json!({})).is_err());
+    }
+
+    #[test]
+    fn escape_like_backslash_escapes_spark_wildcards() {
+        let e = |s: &str| {
+            op_escape_like(json!({ "value": s })).unwrap()["escaped"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Plain text is unchanged.
+        assert_eq!(e("hello"), "hello");
+        // The two LIKE wildcards and the escape char itself are backslash-escaped.
+        assert_eq!(e("100%"), "100\\%");
+        assert_eq!(e("a_b"), "a\\_b");
+        assert_eq!(e("a\\b"), "a\\\\b");
+        // A realistic mix; the backslash is doubled before the wildcards escape.
+        assert_eq!(e("50%_off\\sale"), "50\\%\\_off\\\\sale");
+        // Empty string stays empty; missing arg errors.
+        assert_eq!(e(""), "");
+        assert!(op_escape_like(json!({})).is_err());
     }
 }

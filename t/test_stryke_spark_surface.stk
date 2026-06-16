@@ -65,5 +65,6 @@ assert_ok exists &Spark::unquote_literal, "Spark::unquote_literal exists"
 assert_ok exists &Spark::quote_qualified_ident, "Spark::quote_qualified_ident exists"
 assert_ok exists &Spark::parse_qualified_ident, "Spark::parse_qualified_ident exists"
 assert_ok exists &Spark::quote_ident_if_needed, "Spark::quote_ident_if_needed exists"
+assert_ok exists &Spark::escape_like, "Spark::escape_like exists"
 
 test_run
