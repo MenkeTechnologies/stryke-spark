@@ -313,6 +313,13 @@ fn Spark::build_memory ($bytes) {
     Spark::_decode("build_memory", spark__build_memory(to_json({ bytes => $bytes })))
 }
 
+## Re-express a Spark $memory size in the target binary unit $to (b/k/m/g/t/p):
+## "2g" -> "2048m". Only when the byte count is a whole number of $to (Spark
+## sizes must be integers; "1536m" -> g dies). Returns { string, value, suffix, bytes }.
+fn Spark::convert_memory ($memory, $to) {
+    Spark::_decode("convert_memory", spark__convert_memory(to_json({ memory => $memory, to => $to })))
+}
+
 ## Quote a Spark SQL identifier with backticks (embedded backticks doubled).
 fn Spark::quote_ident ($name) {
     Spark::_decode("quote_ident", spark__quote_ident(to_json({ name => $name })))->{quoted}

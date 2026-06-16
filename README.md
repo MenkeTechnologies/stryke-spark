@@ -213,6 +213,7 @@ Spark::parse_table_name($name)  → { catalog, database, table, parts }     # ba
 Spark::build_table_name(%opts)  → $name                                   # catalog/database/table → dotted name; inverse of parse_table_name
 Spark::parse_memory($memory)    → { value, suffix, bytes, mib }           # Spark size config 512m/2g/1kb → bytes (binary suffixes: 1kb=1024)
 Spark::build_memory($bytes)     → { value, suffix, string, bytes }        # bytes → Spark size string (largest binary unit that divides evenly); inverse of parse_memory
+Spark::convert_memory($memory, $to) → { string, value, suffix, bytes }    # re-express a size in unit $to (b/k/m/g/t/p): 2g → 2048m; errors when not a whole number
 Spark::quote_ident($name)       → $quoted                                 # `weird``col`
 Spark::unquote_ident($quoted)   → $name                                   # inverse of quote_ident: strip backticks, un-double
 Spark::quote_qualified_ident($name) → $quoted                            # cat.db.my table → `cat`.`db`.`my table`

@@ -1,6 +1,6 @@
 [package]
 name = "stryke-spark"
-version = "0.10.0"
+version = "0.11.0"
 description = "Apache Spark client for stryke. cdylib loaded in-process — spawns spark-submit with an embedded PySpark driver per call. Persistent SparkSession deferred (needs long-running JVM daemon design)."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -41,6 +41,7 @@ exports = [
     "spark__build_table_name",
     "spark__parse_memory",
     "spark__build_memory",
+    "spark__convert_memory",
     "spark__quote_ident",
     "spark__unquote_ident",
     "spark__quote_qualified_ident",

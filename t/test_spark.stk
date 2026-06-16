@@ -101,6 +101,14 @@ assert_eq Spark::build_memory(1099511627776)->{string}, "1t",  "build_memory: la
 assert_eq Spark::parse_memory(Spark::build_memory(536870912)->{string})->{bytes}, 536870912, "build_memory: round-trips through parse_memory"
 assert_dies fn { Spark::build_memory() }, "build_memory: requires bytes"
 
+# convert_memory: re-express a size in a chosen whole unit.
+assert_eq Spark::convert_memory("2g", "m")->{string},    "2048m", "convert_memory: 2g → 2048m"
+assert_eq Spark::convert_memory("2048m", "g")->{string}, "2g",    "convert_memory: 2048m → 2g"
+assert_eq Spark::convert_memory("1024", "k")->{string},  "1k",    "convert_memory: bare bytes → 1k"
+assert_eq Spark::convert_memory("2g", "mib")->{string},  "2048m", "convert_memory: iec target emits short suffix"
+assert_dies fn { Spark::convert_memory("1536m", "g") }, "convert_memory: non-whole result dies"
+assert_dies fn { Spark::convert_memory("2g", "x") }, "convert_memory: unknown target suffix dies"
+
 assert_eq Spark::quote_ident("weird`col"), "`weird``col`", "quote_ident: backticks doubled"
 
 # unquote_ident: inverse of quote_ident (strip backticks, un-double).

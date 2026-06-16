@@ -834,15 +834,8 @@ fn op_parse_memory(opts: Value) -> Result<Value> {
     }
     let value: u64 = num.parse()?;
     let suffix = suffix.to_ascii_lowercase();
-    let mult: u64 = match suffix.as_str() {
-        "" | "b" => 1,
-        "k" | "kb" | "ki" | "kib" => 1024,
-        "m" | "mb" | "mi" | "mib" => 1024u64.pow(2),
-        "g" | "gb" | "gi" | "gib" => 1024u64.pow(3),
-        "t" | "tb" | "ti" | "tib" => 1024u64.pow(4),
-        "p" | "pb" | "pi" | "pib" => 1024u64.pow(5),
-        other => return Err(anyhow!("unknown Spark size suffix `{other}`")),
-    };
+    let mult = memory_multiplier(&suffix)
+        .ok_or_else(|| anyhow!("unknown Spark size suffix `{suffix}`"))?;
     let bytes = value
         .checked_mul(mult)
         .ok_or_else(|| anyhow!("size overflows u64 bytes: `{s}`"))?;
@@ -851,6 +844,82 @@ fn op_parse_memory(opts: Value) -> Result<Value> {
         "suffix": suffix,
         "bytes": bytes,
         "mib": bytes as f64 / (1024.0 * 1024.0),
+    }))
+}
+
+/// The byte multiplier for a Spark size suffix (every suffix is BINARY: `k`/`kb`/
+/// `ki`/`kib` all = 1024). Case-sensitive on the already-lowercased suffix; `None`
+/// for unknown. Shared by `parse_memory` and `convert_memory`.
+fn memory_multiplier(suffix: &str) -> Option<u64> {
+    Some(match suffix {
+        "" | "b" => 1,
+        "k" | "kb" | "ki" | "kib" => 1024,
+        "m" | "mb" | "mi" | "mib" => 1024u64.pow(2),
+        "g" | "gb" | "gi" | "gib" => 1024u64.pow(3),
+        "t" | "tb" | "ti" | "tib" => 1024u64.pow(4),
+        "p" | "pb" | "pi" | "pib" => 1024u64.pow(5),
+        _ => return None,
+    })
+}
+
+/// The canonical short suffix (`b`/`k`/`m`/`g`/`t`/`p`) for a byte multiplier —
+/// the form Spark config and `build_memory` emit.
+fn short_memory_suffix(mult: u64) -> &'static str {
+    match mult {
+        1024 => "k",
+        m if m == 1024u64.pow(2) => "m",
+        m if m == 1024u64.pow(3) => "g",
+        m if m == 1024u64.pow(4) => "t",
+        m if m == 1024u64.pow(5) => "p",
+        _ => "b",
+    }
+}
+
+/// Re-express a Spark memory/size value in a target binary unit — `2g` → `2048m`,
+/// `2048m` → `2g`. Parses `memory` to bytes (same rules as `parse_memory`), then
+/// divides by the `to` unit's multiplier, but ONLY when the byte count is an exact
+/// multiple, since Spark sizes must be whole numbers (`1536m` cannot be a whole
+/// number of `g`). `to` accepts the same suffixes as `parse_memory`
+/// (b/k/m/g/t/p, case-insensitive) and the output uses the canonical short form.
+/// opts: `memory` (required), `to` (required). Returns `{string, value, suffix,
+/// bytes}`; errors when the result would not be a whole number. Pure.
+fn op_convert_memory(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("memory")
+        .or_else(|| opts.get("size"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing memory"))?;
+    let to_raw = opts
+        .get("to")
+        .or_else(|| opts.get("unit"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing to (target unit)"))?;
+    let s = raw.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, suffix) = s.split_at(split);
+    if num.is_empty() {
+        return Err(anyhow!("Spark size `{s}` has no numeric value"));
+    }
+    let value: u64 = num.parse()?;
+    let src_mult = memory_multiplier(&suffix.to_ascii_lowercase())
+        .ok_or_else(|| anyhow!("unknown Spark size suffix `{suffix}`"))?;
+    let bytes = value
+        .checked_mul(src_mult)
+        .ok_or_else(|| anyhow!("size overflows u64 bytes: `{s}`"))?;
+    let to_mult = memory_multiplier(&to_raw.trim().to_ascii_lowercase())
+        .ok_or_else(|| anyhow!("unknown target suffix `{to_raw}`"))?;
+    if !bytes.is_multiple_of(to_mult) {
+        return Err(anyhow!(
+            "{bytes} bytes is not a whole number of `{to_raw}` (Spark sizes must be integers)"
+        ));
+    }
+    let short = short_memory_suffix(to_mult);
+    let out_value = bytes / to_mult;
+    Ok(json!({
+        "string": format!("{out_value}{short}"),
+        "value": out_value,
+        "suffix": short,
+        "bytes": bytes,
     }))
 }
 
@@ -1120,6 +1189,11 @@ pub extern "C" fn spark__parse_memory(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__build_memory(args: *const c_char) -> *const c_char {
     ffi_call(args, op_build_memory)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__convert_memory(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_convert_memory)
 }
 
 #[no_mangle]
@@ -2077,6 +2151,36 @@ mod tests {
             );
         }
         assert!(op_build_memory(json!({})).is_err());
+    }
+
+    #[test]
+    fn convert_memory_reexpresses_in_a_chosen_whole_unit() {
+        let conv = |mem: &str, to: &str| {
+            op_convert_memory(json!({"memory": mem, "to": to})).unwrap()["string"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Down a unit and back up.
+        assert_eq!(conv("2g", "m"), "2048m");
+        assert_eq!(conv("2048m", "g"), "2g");
+        assert_eq!(conv("1g", "b"), "1073741824b");
+        // No-suffix source is bytes; target uses the canonical short suffix.
+        assert_eq!(conv("1024", "k"), "1k");
+        // A long/iec target suffix still emits the short form.
+        assert_eq!(conv("2g", "mib"), "2048m");
+        assert_eq!(conv("2g", "gb"), "2g");
+        // The byte count and value are reported too.
+        let v = op_convert_memory(json!({"memory": "2g", "to": "m"})).unwrap();
+        assert_eq!(v["value"], json!(2048));
+        assert_eq!(v["bytes"], json!(2_147_483_648u64));
+        // Not a whole number of the target unit → error (Spark needs integers).
+        assert!(op_convert_memory(json!({"memory": "1536m", "to": "g"})).is_err());
+        // Unknown source/target suffix and missing args reject.
+        assert!(op_convert_memory(json!({"memory": "2x", "to": "m"})).is_err());
+        assert!(op_convert_memory(json!({"memory": "2g", "to": "x"})).is_err());
+        assert!(op_convert_memory(json!({"memory": "2g"})).is_err());
+        assert!(op_convert_memory(json!({"to": "m"})).is_err());
     }
 
     #[test]
