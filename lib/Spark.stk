@@ -370,6 +370,32 @@ fn Spark::unquote_literal ($value) {
     Spark::_decode("unquote_literal", spark__unquote_literal(to_json({ value => $value })))->{value}
 }
 
+## Build a Spark SQL partition spec clause "PARTITION (col=val, …)" from an
+## ordered list of [column, value] pairs — the form ALTER TABLE … ADD/DROP
+## PARTITION and INSERT … PARTITION take. A column name is quoted only when it
+## needs it (quote_ident_if_needed); a numeric value is emitted bare, any other
+## value becomes a single-quoted string literal (quote_literal), and an undef (or
+## omitted) value yields a bare column — a dynamic-partition column for INSERT.
+## $pairs is an arrayref of two-element [col, val] arrayrefs; order is preserved
+## to match the table's partition-column order. Pure-stk (composes quote_literal,
+## whose backslash escapes must not cross the JSON FFI). Returns the clause string.
+fn Spark::build_partition_spec ($pairs) {
+    die "Spark::build_partition_spec: pairs must be an arrayref" unless ref($pairs) eq "ARRAY"
+    var @parts
+    for val $pair (@$pairs) {
+        die "Spark::build_partition_spec: each entry must be a [col, val] arrayref" unless ref($pair) eq "ARRAY" && @$pair >= 1
+        val $col = Spark::quote_ident_if_needed($pair->[0])
+        if (@$pair < 2 || !defined($pair->[1])) {
+            push @parts, $col
+        } elsif (looks_like_number($pair->[1])) {
+            push @parts, $col . "=" . $pair->[1]
+        } else {
+            push @parts, $col . "=" . Spark::quote_literal($pair->[1])
+        }
+    }
+    "PARTITION (" . join(", ", @parts) . ")"
+}
+
 ## Quote a qualified table identifier "[catalog.][database.]table" — each part
 ## backtick-quoted and rejoined. Splitting is backtick-aware, so a "." inside
 ## backticks stays in one part. Returns the quoted string.

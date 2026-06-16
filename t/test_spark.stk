@@ -131,6 +131,14 @@ assert_eq Spark::unquote_literal(Spark::quote_literal("a" . chr(9) . "b")), "a" 
 assert_eq Spark::unquote_literal(Spark::quote_literal("café")), "café", "unquote_literal: round-trips non-ASCII"
 assert_dies fn { Spark::unquote_literal("noquotes") }, "unquote_literal: rejects an unquoted value"
 
+# build_partition_spec: Spark SQL PARTITION (...) DDL clause from ordered pairs.
+assert_eq Spark::build_partition_spec([["year", 2024], ["month", 1]]), "PARTITION (year=2024, month=1)", "build_partition_spec: numeric values emitted bare"
+assert_eq Spark::build_partition_spec([["region", "us-east"]]), "PARTITION (region='us-east')", "build_partition_spec: string value single-quoted"
+assert_eq Spark::build_partition_spec([["region", "it's"]]), "PARTITION (region='it\\'s')", "build_partition_spec: string value escaped via quote_literal"
+assert_eq Spark::build_partition_spec([["dt", 20240601], ["active"]]), "PARTITION (dt=20240601, active)", "build_partition_spec: undef value → bare dynamic-partition column"
+assert_eq Spark::build_partition_spec([["weird col", "x"]]), "PARTITION (`weird col`='x')", "build_partition_spec: column quoted only when needed"
+assert_dies fn { Spark::build_partition_spec("nope") }, "build_partition_spec: rejects a non-arrayref"
+
 # escape_like: backslash-escape the Spark LIKE wildcards % _ and the escape char \.
 assert_eq Spark::escape_like("plain"),  "plain",     "escape_like: plain text unchanged"
 assert_eq Spark::escape_like("100%"),   "100\\%",    "escape_like: percent wildcard escaped"
