@@ -360,6 +360,16 @@ fn Spark::quote_literal ($value) {
     "\x27" . $s . "\x27"
 }
 
+## Decode a single-quoted Spark SQL string literal back to its raw value — the
+## inverse of quote_literal. Processes the Spark regular-string escapes in a single
+## left-to-right pass (\\ \' \0 \b \t \n \r \Z, and \<other> → that character). An
+## unescaped interior single quote or a trailing backslash is rejected. Unlike
+## quote_literal (pure-stk), the decoded result is plain text with no backslash
+## sequences, so the cdylib op crosses the JSON FFI cleanly. Returns the raw string.
+fn Spark::unquote_literal ($value) {
+    Spark::_decode("unquote_literal", spark__unquote_literal(to_json({ value => $value })))->{value}
+}
+
 ## Quote a qualified table identifier "[catalog.][database.]table" — each part
 ## backtick-quoted and rejoined. Splitting is backtick-aware, so a "." inside
 ## backticks stays in one part. Returns the quoted string.

@@ -123,6 +123,13 @@ assert_eq Spark::quote_literal("it's"),  "'it\\'s'",   "quote_literal: single qu
 assert_eq Spark::quote_literal("a\\b"),  "'a\\\\b'",   "quote_literal: backslash escaped"
 assert_eq Spark::quote_literal("a" . chr(9) . "b"), "'a\\tb'", "quote_literal: tab → \\t"
 assert_eq Spark::quote_literal(""),      "''",         "quote_literal: empty string is the empty literal"
+# unquote_literal: inverse of quote_literal (decode the Spark escapes).
+assert_eq Spark::unquote_literal("'hello'"),  "hello",  "unquote_literal: plain literal"
+assert_eq Spark::unquote_literal("'it\\'s'"), "it's",   "unquote_literal: decodes the escaped quote"
+assert_eq Spark::unquote_literal("'a\\\\b'"), "a\\b",   "unquote_literal: decodes the escaped backslash"
+assert_eq Spark::unquote_literal(Spark::quote_literal("a" . chr(9) . "b")), "a" . chr(9) . "b", "unquote_literal: round-trips quote_literal through a tab"
+assert_eq Spark::unquote_literal(Spark::quote_literal("café")), "café", "unquote_literal: round-trips non-ASCII"
+assert_dies fn { Spark::unquote_literal("noquotes") }, "unquote_literal: rejects an unquoted value"
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.
 assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table`", "quote_qualified_ident: three-level namespace"
 assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"

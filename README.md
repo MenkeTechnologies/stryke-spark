@@ -217,6 +217,7 @@ Spark::convert_memory($memory, $to) → { string, value, suffix, bytes }    # re
 Spark::quote_ident($name)       → $quoted                                 # `weird``col`
 Spark::unquote_ident($quoted)   → $name                                   # inverse of quote_ident: strip backticks, un-double
 Spark::quote_literal($value)    → $quoted                                 # value-level companion: it's → 'it\'s' (Spark string-literal escapes \\ \' \0 \b \t \n \r \Z)
+Spark::unquote_literal($quoted) → $value                                  # inverse of quote_literal: 'it\'s' → it's (single left-to-right escape pass)
 Spark::quote_qualified_ident($name) → $quoted                            # cat.db.my table → `cat`.`db`.`my table`
 Spark::parse_qualified_ident($name) → { name, parts, count }             # inverse: `cat`.`my db`.`tbl` → ["cat","my db","tbl"]; dot inside backticks stays literal
 Spark::quote_ident_if_needed($name) → $quoted                            # Spark quoteIfNeeded: users → users, 1col → `1col` (quote only when not bare-legal)

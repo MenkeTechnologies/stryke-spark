@@ -992,6 +992,51 @@ fn op_unquote_ident(opts: Value) -> Result<Value> {
     Ok(json!({ "name": inner.replace("``", "`") }))
 }
 
+/// Decode a single-quoted Spark SQL string literal back to its raw value — the
+/// inverse of `quote_literal`. The value must be wrapped in single quotes; inside,
+/// the Spark regular-string escapes are processed in a single left-to-right pass:
+/// `\\` → `\`, `\'` → `'`, `\0` → NUL, `\b` (0x08), `\t`, `\n`, `\r`, `\Z` (0x1A),
+/// and `\<other>` → that character (the backslash is dropped, per sql-ref-literals).
+/// An unescaped interior single quote, or a trailing backslash, is rejected. opts:
+/// `value` (or `quoted`/`literal`, required). Returns `{value}`. Pure.
+fn op_unquote_literal(opts: Value) -> Result<Value> {
+    let q = opts
+        .get("value")
+        .or_else(|| opts.get("quoted"))
+        .or_else(|| opts.get("literal"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let inner = q
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .filter(|_| q.len() >= 2)
+        .ok_or_else(|| anyhow!("not a single-quoted Spark string literal: {q}"))?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            // A bare single quote inside should have been written as `\'`.
+            if c == '\'' {
+                return Err(anyhow!("unescaped single quote in literal: {q}"));
+            }
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            None => return Err(anyhow!("trailing backslash in literal: {q}")),
+            Some('0') => out.push('\0'),
+            Some('b') => out.push('\u{0008}'),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('Z') => out.push('\u{001A}'),
+            // `\'` → `'`, `\\` → `\`, and any other `\x` → `x`.
+            Some(other) => out.push(other),
+        }
+    }
+    Ok(json!({ "value": out }))
+}
+
 /// Quote a qualified Spark table identifier `[catalog.][database.]table`,
 /// backtick-quoting each part and rejoining with `.`. Splitting honors backtick
 /// quoting (a `.` inside backticks stays in one part), so it round-trips with
@@ -1269,6 +1314,11 @@ pub extern "C" fn spark__quote_ident(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__unquote_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_unquote_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__unquote_literal(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unquote_literal)
 }
 
 #[no_mangle]
@@ -2352,6 +2402,31 @@ mod tests {
         assert!(op_unquote_ident(json!({"quoted": "plain"})).is_err());
         assert!(op_unquote_ident(json!({"quoted": "`a`b`"})).is_err());
         assert!(op_unquote_ident(json!({})).is_err());
+    }
+
+    #[test]
+    fn unquote_literal_decodes_spark_string_escapes() {
+        let u = |q: &str| {
+            op_unquote_literal(json!({ "value": q })).unwrap()["value"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Plain literal and the escaped single quote / backslash.
+        assert_eq!(u("'plain'"), "plain");
+        assert_eq!(u("'it\\'s'"), "it's");
+        assert_eq!(u("'a\\\\b'"), "a\\b");
+        assert_eq!(u("''"), "");
+        // Named control escapes.
+        assert_eq!(u("'a\\tb\\nc'"), "a\tb\nc");
+        assert_eq!(u("'\\0\\b\\Z'"), "\0\u{0008}\u{001A}");
+        // `\<other>` drops the backslash (sql-ref-literals: backslash skipped).
+        assert_eq!(u("'a\\qb'"), "aqb");
+        // Errors: not single-quoted, a bare interior quote, a trailing backslash.
+        assert!(op_unquote_literal(json!({"value": "noquotes"})).is_err());
+        assert!(op_unquote_literal(json!({"value": "'a'b'"})).is_err());
+        assert!(op_unquote_literal(json!({"value": "'a\\'"})).is_err());
+        assert!(op_unquote_literal(json!({})).is_err());
     }
 
     #[test]
