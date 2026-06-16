@@ -117,6 +117,12 @@ assert_eq Spark::unquote_ident("`plain`"),      "plain",     "unquote_ident: pla
 assert_eq Spark::unquote_ident(Spark::quote_ident("has space")), "has space", "unquote_ident: round-trips quote_ident"
 assert_dies fn { Spark::unquote_ident("plain") },   "unquote_ident: rejects an unquoted name"
 assert_dies fn { Spark::unquote_ident("`a`b`") },   "unquote_ident: rejects an unpaired backtick"
+# quote_literal: single-quoted SQL string literal, Spark escape grammar.
+assert_eq Spark::quote_literal("hello"), "'hello'",    "quote_literal: plain text just wrapped"
+assert_eq Spark::quote_literal("it's"),  "'it\\'s'",   "quote_literal: single quote escaped"
+assert_eq Spark::quote_literal("a\\b"),  "'a\\\\b'",   "quote_literal: backslash escaped"
+assert_eq Spark::quote_literal("a" . chr(9) . "b"), "'a\\tb'", "quote_literal: tab → \\t"
+assert_eq Spark::quote_literal(""),      "''",         "quote_literal: empty string is the empty literal"
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.
 assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table`", "quote_qualified_ident: three-level namespace"
 assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"

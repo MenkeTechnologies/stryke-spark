@@ -332,6 +332,34 @@ fn Spark::unquote_ident ($quoted) {
     Spark::_decode("unquote_ident", spark__unquote_ident(to_json({ quoted => $quoted })))->{name}
 }
 
+## Quote an arbitrary string as a Spark SQL string literal — the value-level
+## companion of quote_ident (which backtick-quotes identifiers). Single-quote-
+## wrapped, escaped per Spark's regular-string-literal grammar (sql-ref-literals):
+## \ → \\, ' → \', and the named control escapes \0 (NUL), \b (0x08), \t (0x09),
+## \n (0x0A), \r (0x0D), \Z (0x1A). Every other byte is verbatim, so the result
+## re-parses to the original under Spark's default (non-raw) literal rules. Use it
+## to splice a value into Spark SQL without injection. Returns the quoted string
+## (including the surrounding single quotes).
+##
+## Pure-stk (no cdylib op): the escaped text carries backslash sequences that
+## stryke's JSON FFI _decode would mangle (\t → a literal tab), so the escaping is
+## done here with byte-targeted s///ge. Every pattern matches a single ASCII byte
+## that never occurs inside a UTF-8 multibyte sequence, so non-ASCII text is
+## preserved. Backslash is doubled first so later escapes aren't re-escaped.
+fn Spark::quote_literal ($value) {
+    val $bs = chr(92)
+    var $s = $value
+    $s =~ s/\x5c/$bs . $bs/ge
+    $s =~ s/\x27/$bs . "\x27"/ge
+    $s =~ s/\x00/$bs . "0"/ge
+    $s =~ s/\x08/$bs . "b"/ge
+    $s =~ s/\x09/$bs . "t"/ge
+    $s =~ s/\x0a/$bs . "n"/ge
+    $s =~ s/\x0d/$bs . "r"/ge
+    $s =~ s/\x1a/$bs . "Z"/ge
+    "\x27" . $s . "\x27"
+}
+
 ## Quote a qualified table identifier "[catalog.][database.]table" — each part
 ## backtick-quoted and rejoined. Splitting is backtick-aware, so a "." inside
 ## backticks stays in one part. Returns the quoted string.
