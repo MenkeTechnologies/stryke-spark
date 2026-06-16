@@ -61,6 +61,7 @@ assert_ok exists &Spark::build_table_name, "Spark::build_table_name exists"
 assert_ok exists &Spark::quote_ident, "Spark::quote_ident exists"
 assert_ok exists &Spark::unquote_ident, "Spark::unquote_ident exists"
 assert_ok exists &Spark::quote_qualified_ident, "Spark::quote_qualified_ident exists"
+assert_ok exists &Spark::parse_qualified_ident, "Spark::parse_qualified_ident exists"
 assert_ok exists &Spark::quote_ident_if_needed, "Spark::quote_ident_if_needed exists"
 
 test_run

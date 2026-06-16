@@ -122,6 +122,16 @@ assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table
 assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"
 assert_dies fn { Spark::quote_qualified_ident("a.b.c.d") }, "quote_qualified_ident: rejects over-deep names"
 
+# parse_qualified_ident: inverse of quote_qualified_ident.
+assert_eq join("|", @{ Spark::parse_qualified_ident("`cat`.`my db`.`tbl`")->{parts} }), "cat|my db|tbl", "parse_qualified_ident: splits backtick-quoted parts"
+assert_eq Spark::parse_qualified_ident("`db`.`weird.table`")->{parts}[1], "weird.table", "parse_qualified_ident: dot inside backticks is literal"
+assert_eq Spark::parse_qualified_ident("`we``ird`")->{parts}[0], "we`ird", "parse_qualified_ident: doubled backtick decodes to one"
+assert_eq Spark::parse_qualified_ident("a.b.c")->{count}, 3, "parse_qualified_ident: bare parts pass through"
+# Round-trips quote_qualified_ident.
+assert_eq join("|", @{ Spark::parse_qualified_ident(Spark::quote_qualified_ident("cat.db.my table"))->{parts} }), "cat|db|my table", "parse_qualified_ident: round-trips quote_qualified_ident"
+assert_dies fn { Spark::parse_qualified_ident("a..b") }, "parse_qualified_ident: rejects an empty part"
+assert_dies fn { Spark::parse_qualified_ident("a.b.c.d") }, "parse_qualified_ident: rejects over-deep names"
+
 # quote_ident_if_needed: Spark quoteIfNeeded — quote only when not bare-legal.
 assert_eq Spark::quote_ident_if_needed("users"), "users", "quote_ident_if_needed: bare-legal name untouched"
 assert_eq Spark::quote_ident_if_needed("_tmp"),  "_tmp",  "quote_ident_if_needed: leading underscore is bare-legal"

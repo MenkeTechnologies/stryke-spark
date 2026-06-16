@@ -1019,6 +1019,71 @@ fn op_quote_qualified_ident(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quoted, "parts": parts}))
 }
 
+/// Split a dotted, possibly backtick-quoted qualified identifier into its parts
+/// — the inverse of `quote_qualified_ident`. A `.` inside backticks stays
+/// literal and a doubled `` `` `` decodes to one backtick, so
+/// `` `cat`.`my db`.`tbl` `` → `["cat", "my db", "tbl"]`. Rejects an unquoted
+/// empty segment, an unterminated backtick, and more than 3 parts
+/// (catalog.database.table). opts: `name` (or `quoted`). Returns `{name, parts,
+/// count}`. Pure.
+fn op_parse_qualified_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .or_else(|| opts.get("quoted"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let chars: Vec<char> = name.chars().collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    let mut had = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_quote {
+            if c == '`' && i + 1 < chars.len() && chars[i + 1] == '`' {
+                cur.push('`');
+                i += 2;
+            } else if c == '`' {
+                in_quote = false;
+                i += 1;
+            } else {
+                cur.push(c);
+                i += 1;
+            }
+        } else if c == '`' {
+            in_quote = true;
+            had = true;
+            i += 1;
+        } else if c == '.' {
+            if !had {
+                return Err(anyhow!("qualified identifier has an empty part: {name}"));
+            }
+            parts.push(std::mem::take(&mut cur));
+            had = false;
+            i += 1;
+        } else {
+            cur.push(c);
+            had = true;
+            i += 1;
+        }
+    }
+    if in_quote {
+        return Err(anyhow!("unterminated backtick in {name}"));
+    }
+    if !had {
+        return Err(anyhow!("qualified identifier has an empty part: {name}"));
+    }
+    parts.push(cur);
+    if parts.len() > 3 {
+        return Err(anyhow!(
+            "too many parts (max catalog.database.table): {name}"
+        ));
+    }
+    let count = parts.len();
+    Ok(json!({"name": name, "parts": parts, "count": count}))
+}
+
 /// Spark's `QuotingUtils.quoteIfNeeded`: backtick-quote an identifier ONLY when
 /// it is not already a bare-legal name, otherwise return it untouched — distinct
 /// from `quote_ident`, which always wraps. This is what Spark uses when emitting
@@ -1209,6 +1274,11 @@ pub extern "C" fn spark__unquote_ident(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__quote_qualified_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_qualified_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_qualified_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_qualified_ident)
 }
 
 #[no_mangle]
@@ -2302,6 +2372,38 @@ mod tests {
             json!("`t`")
         );
         assert!(op_quote_qualified_ident(json!({"name": "a.b.c.d"})).is_err());
+    }
+
+    #[test]
+    fn parse_qualified_ident_inverts_quote_qualified_ident() {
+        let parts =
+            |s: &str| op_parse_qualified_ident(json!({ "name": s })).unwrap()["parts"].clone();
+        // Backtick-quoted parts, including one with an inner dot.
+        assert_eq!(parts("`cat`.`my db`.`tbl`"), json!(["cat", "my db", "tbl"]));
+        assert_eq!(parts("`db`.`weird.table`"), json!(["db", "weird.table"]));
+        // A doubled backtick inside a quoted part decodes to one.
+        assert_eq!(parts("`we``ird`"), json!(["we`ird"]));
+        // Bare (unquoted) parts pass through; mixed bare + quoted works.
+        assert_eq!(parts("a.b.c"), json!(["a", "b", "c"]));
+        assert_eq!(parts("db.`my table`"), json!(["db", "my table"]));
+        assert_eq!(
+            op_parse_qualified_ident(json!({"name": "`t`"})).unwrap()["count"],
+            json!(1)
+        );
+        // Round-trips quote_qualified_ident for every part shape.
+        for name in ["cat.db.my table", "events", "db.`weird.table`", "a.b"] {
+            let quoted = op_quote_qualified_ident(json!({ "name": name })).unwrap();
+            let reparsed =
+                op_parse_qualified_ident(json!({ "name": quoted["quoted"].as_str().unwrap() }))
+                    .unwrap();
+            assert_eq!(reparsed["parts"], quoted["parts"], "round-trip for {name}");
+        }
+        // Errors: empty segment, unterminated backtick, over-deep, missing.
+        assert!(op_parse_qualified_ident(json!({"name": "a..b"})).is_err());
+        assert!(op_parse_qualified_ident(json!({"name": ".a"})).is_err());
+        assert!(op_parse_qualified_ident(json!({"name": "`unterminated"})).is_err());
+        assert!(op_parse_qualified_ident(json!({"name": "a.b.c.d"})).is_err());
+        assert!(op_parse_qualified_ident(json!({})).is_err());
     }
 
     #[test]
