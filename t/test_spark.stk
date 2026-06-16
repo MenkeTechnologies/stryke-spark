@@ -138,6 +138,15 @@ assert_eq Spark::escape_like("a_b"),    "a\\_b",     "escape_like: underscore wi
 assert_eq Spark::escape_like("a\\b"),   "a\\\\b",    "escape_like: the escape char itself is doubled"
 assert_eq Spark::escape_like("50%_x"),  "50\\%\\_x", "escape_like: both wildcards in one value"
 
+# unescape_like: inverse of escape_like — recover the literal.
+assert_eq Spark::unescape_like("plain"),     "plain", "unescape_like: plain text unchanged"
+assert_eq Spark::unescape_like("100\\%"),    "100%",  "unescape_like: escaped percent decodes to literal"
+assert_eq Spark::unescape_like("a\\_b"),     "a_b",   "unescape_like: escaped underscore decodes to literal"
+assert_eq Spark::unescape_like("a\\\\b"),    "a\\b",  "unescape_like: doubled backslash decodes to one"
+assert_eq Spark::unescape_like(Spark::escape_like("50%_off\\sale")), "50%_off\\sale", "unescape_like: round-trips escape_like"
+assert_dies fn { Spark::unescape_like("a%b") },    "unescape_like: rejects an unescaped wildcard"
+assert_dies fn { Spark::unescape_like("trail\\") }, "unescape_like: rejects a dangling backslash"
+
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.
 assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table`", "quote_qualified_ident: three-level namespace"
 assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"

@@ -402,3 +402,11 @@ fn Spark::quote_ident_if_needed ($name) {
 fn Spark::escape_like ($value) {
     Spark::_decode("escape_like", spark__escape_like(to_json({ value => $value })))->{escaped}
 }
+
+## Inverse of escape_like: recover the literal from a Spark SQL LIKE pattern that
+## escape_like produced (\% → %, \_ → _, \\ → \). Rejects an unescaped wildcard
+## or a dangling backslash — those mean a real pattern, not a LIKE-escaped
+## literal. Returns the recovered string.
+fn Spark::unescape_like ($value) {
+    Spark::_decode("unescape_like", spark__unescape_like(to_json({ value => $value })))->{unescaped}
+}
