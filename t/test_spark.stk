@@ -103,6 +103,12 @@ assert_dies fn { Spark::build_memory() }, "build_memory: requires bytes"
 
 assert_eq Spark::quote_ident("weird`col"), "`weird``col`", "quote_ident: backticks doubled"
 
+# unquote_ident: inverse of quote_ident (strip backticks, un-double).
+assert_eq Spark::unquote_ident("`weird``col`"), "weird`col", "unquote_ident: doubled backtick decodes to one"
+assert_eq Spark::unquote_ident("`plain`"),      "plain",     "unquote_ident: plain quoted name"
+assert_eq Spark::unquote_ident(Spark::quote_ident("has space")), "has space", "unquote_ident: round-trips quote_ident"
+assert_dies fn { Spark::unquote_ident("plain") },   "unquote_ident: rejects an unquoted name"
+assert_dies fn { Spark::unquote_ident("`a`b`") },   "unquote_ident: rejects an unpaired backtick"
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.
 assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table`", "quote_qualified_ident: three-level namespace"
 assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"

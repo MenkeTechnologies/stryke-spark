@@ -214,6 +214,7 @@ Spark::build_table_name(%opts)  → $name                                   # ca
 Spark::parse_memory($memory)    → { value, suffix, bytes, mib }           # Spark size config 512m/2g/1kb → bytes (binary suffixes: 1kb=1024)
 Spark::build_memory($bytes)     → { value, suffix, string, bytes }        # bytes → Spark size string (largest binary unit that divides evenly); inverse of parse_memory
 Spark::quote_ident($name)       → $quoted                                 # `weird``col`
+Spark::unquote_ident($quoted)   → $name                                   # inverse of quote_ident: strip backticks, un-double
 Spark::quote_qualified_ident($name) → $quoted                            # cat.db.my table → `cat`.`db`.`my table`
 ```
 

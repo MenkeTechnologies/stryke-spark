@@ -318,6 +318,13 @@ fn Spark::quote_ident ($name) {
     Spark::_decode("quote_ident", spark__quote_ident(to_json({ name => $name })))->{quoted}
 }
 
+## Decode a backtick-quoted Spark SQL identifier back to its raw name — inverse
+## of quote_ident (strips the backticks, un-doubles embedded ``). Dies on an
+## unquoted input or an unpaired backtick.
+fn Spark::unquote_ident ($quoted) {
+    Spark::_decode("unquote_ident", spark__unquote_ident(to_json({ quoted => $quoted })))->{name}
+}
+
 ## Quote a qualified table identifier "[catalog.][database.]table" — each part
 ## backtick-quoted and rejoined. Splitting is backtick-aware, so a "." inside
 ## backticks stays in one part. Returns the quoted string.
