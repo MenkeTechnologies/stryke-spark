@@ -219,6 +219,7 @@ Spark::unquote_ident($quoted)   → $name                                   # in
 Spark::quote_literal($value)    → $quoted                                 # value-level companion: it's → 'it\'s' (Spark string-literal escapes \\ \' \0 \b \t \n \r \Z)
 Spark::unquote_literal($quoted) → $value                                  # inverse of quote_literal: 'it\'s' → it's (single left-to-right escape pass)
 Spark::build_partition_spec(\@pairs) → $clause                            # ordered [col,val] pairs → PARTITION (col=val, …) DDL; numeric bare, string quote_literal'd, undef → bare dynamic column
+Spark::parse_partition_spec($spec)   → \%{ partitions:[{column,value}] }  # inverse of build_partition_spec; quote-aware split, string value unquote_literal'd, numeric parsed, no `=` → dynamic column (undef)
 Spark::quote_qualified_ident($name) → $quoted                            # cat.db.my table → `cat`.`db`.`my table`
 Spark::parse_qualified_ident($name) → { name, parts, count }             # inverse: `cat`.`my db`.`tbl` → ["cat","my db","tbl"]; dot inside backticks stays literal
 Spark::quote_ident_if_needed($name) → $quoted                            # Spark quoteIfNeeded: users → users, 1col → `1col` (quote only when not bare-legal)

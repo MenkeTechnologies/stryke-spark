@@ -396,6 +396,17 @@ fn Spark::build_partition_spec ($pairs) {
     "PARTITION (" . join(", ", @parts) . ")"
 }
 
+## Parse a Spark SQL partition spec — the inverse of build_partition_spec. Accepts
+## the full "PARTITION (col=val, …)" clause or the bare "col=val, …" inner list.
+## Splits on top-level commas and each entry on its first top-level "=" (commas/=
+## inside '…' literals or `…` idents are ignored); a quoted value is decoded via
+## unquote_literal, a bare value parsed as a number, and an entry with no "=" is a
+## dynamic-partition column (value undef). Returns a hashref { partitions:[{ column,
+## value }] }. Decode direction → plain output, so the cdylib op crosses the FFI cleanly.
+fn Spark::parse_partition_spec ($spec) {
+    Spark::_decode("parse_partition_spec", spark__parse_partition_spec(to_json({ spec => $spec })))
+}
+
 ## Quote a qualified table identifier "[catalog.][database.]table" — each part
 ## backtick-quoted and rejoined. Splitting is backtick-aware, so a "." inside
 ## backticks stays in one part. Returns the quoted string.

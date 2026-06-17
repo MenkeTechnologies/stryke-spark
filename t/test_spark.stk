@@ -139,6 +139,22 @@ assert_eq Spark::build_partition_spec([["dt", 20240601], ["active"]]), "PARTITIO
 assert_eq Spark::build_partition_spec([["weird col", "x"]]), "PARTITION (`weird col`='x')", "build_partition_spec: column quoted only when needed"
 assert_dies fn { Spark::build_partition_spec("nope") }, "build_partition_spec: rejects a non-arrayref"
 
+# parse_partition_spec: the inverse of build_partition_spec.
+val $ps = Spark::parse_partition_spec("PARTITION (region='us-east', dt=20240101, active)")
+assert_eq $ps->{partitions}[0]{column}, "region",   "parse_partition_spec: column name"
+assert_eq $ps->{partitions}[0]{value},  "us-east",  "parse_partition_spec: string value decoded"
+assert_eq $ps->{partitions}[1]{value},  20240101,   "parse_partition_spec: numeric value parsed"
+assert_eq defined($ps->{partitions}[2]{value}), 0,   "parse_partition_spec: dynamic column → undef value"
+assert_eq $ps->{partitions}[2]{column}, "active",    "parse_partition_spec: dynamic column name parsed"
+# round-trips build_partition_spec (string with an escaped quote + a quoted ident)
+val $rt = Spark::parse_partition_spec(Spark::build_partition_spec([["weird col", "it's"], ["y", 5]]))
+assert_eq $rt->{partitions}[0]{column}, "weird col", "parse_partition_spec: round-trips a quoted column"
+assert_eq $rt->{partitions}[0]{value},  "it's",      "parse_partition_spec: round-trips an escaped value"
+assert_eq $rt->{partitions}[1]{value},  5,           "parse_partition_spec: round-trips a numeric value"
+# a comma/= inside a quoted value does not split it
+assert_eq Spark::parse_partition_spec("k='a, b=c'")->{partitions}[0]{value}, "a, b=c", "parse_partition_spec: quote-aware split"
+assert_dies fn { Spark::parse_partition_spec("PARTITION (a=1") }, "parse_partition_spec: rejects an unterminated clause"
+
 # escape_like: backslash-escape the Spark LIKE wildcards % _ and the escape char \.
 assert_eq Spark::escape_like("plain"),  "plain",     "escape_like: plain text unchanged"
 assert_eq Spark::escape_like("100%"),   "100\\%",    "escape_like: percent wildcard escaped"

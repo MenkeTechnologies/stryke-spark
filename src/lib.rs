@@ -737,6 +737,60 @@ fn split_qualified(s: &str) -> Vec<String> {
     out
 }
 
+/// Split `s` on top-level `sep`, leaving the segments verbatim (quotes kept).
+/// A `sep` inside a `'…'` Spark string literal (with `\'`/`\\` escapes) or a
+/// `` `…` `` backtick identifier (with `` `` `` doubling) does not split. Errors on
+/// an unterminated quote. Used to break a partition spec into entries and an
+/// entry into column/value without tripping over commas or `=` inside literals.
+fn split_partition_top_level(s: &str, sep: char) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = s.chars().peekable();
+    let mut in_squote = false;
+    let mut in_tick = false;
+    while let Some(c) = chars.next() {
+        if in_squote {
+            cur.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            } else if c == '\'' {
+                in_squote = false;
+            }
+            continue;
+        }
+        if in_tick {
+            cur.push(c);
+            if c == '`' {
+                if chars.peek() == Some(&'`') {
+                    cur.push(chars.next().unwrap());
+                } else {
+                    in_tick = false;
+                }
+            }
+            continue;
+        }
+        match c {
+            '\'' => {
+                in_squote = true;
+                cur.push(c);
+            }
+            '`' => {
+                in_tick = true;
+                cur.push(c);
+            }
+            _ if c == sep => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    if in_squote || in_tick {
+        return Err(anyhow!("unterminated quote in partition spec: {s}"));
+    }
+    out.push(cur);
+    Ok(out)
+}
+
 /// Parse a Spark table identifier `[catalog.][database.]table` (Spark 3
 /// three-level namespace) into `{catalog, database, table, parts}`. Backtick
 /// quoting is honored, so a `.` inside backticks stays in one part. Pure.
@@ -1035,6 +1089,87 @@ fn op_unquote_literal(opts: Value) -> Result<Value> {
         }
     }
     Ok(json!({ "value": out }))
+}
+
+/// Parse a Spark SQL partition spec — the inverse of build_partition_spec. Accepts
+/// either the full `PARTITION (col=val, …)` clause or the bare `col=val, …` inner
+/// list. Entries split on top-level commas and each on its first top-level `=`
+/// (commas/`=` inside `'…'` literals or `` `…` `` idents are ignored). A column is
+/// backtick-unquoted via unquote_ident when quoted; a single-quoted value is
+/// decoded via unquote_literal, a bare value is parsed as a number, and an entry
+/// with no `=` is a dynamic-partition column (`value: null`). Round-trips
+/// build_partition_spec. opts: `spec` (or `value`/`clause`, required). Returns
+/// `{partitions:[{column, value}]}`. Pure.
+fn op_parse_partition_spec(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("spec")
+        .or_else(|| opts.get("value"))
+        .or_else(|| opts.get("clause"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing spec"))?;
+    let trimmed = raw.trim();
+    // Strip an optional `PARTITION ( … )` wrapper (keyword is case-insensitive).
+    let inner = if trimmed.len() >= "partition".len()
+        && trimmed[.."partition".len()].eq_ignore_ascii_case("partition")
+    {
+        let after = trimmed["partition".len()..].trim_start();
+        after
+            .strip_prefix('(')
+            .ok_or_else(|| anyhow!("expected `(` after PARTITION"))?
+            .strip_suffix(')')
+            .ok_or_else(|| anyhow!("unterminated PARTITION ( … )"))?
+            .trim()
+    } else {
+        trimmed
+    };
+    if inner.is_empty() {
+        return Ok(json!({ "partitions": [] }));
+    }
+    let mut partitions = Vec::new();
+    for entry in split_partition_top_level(inner, ',')? {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(anyhow!("empty partition entry in spec"));
+        }
+        let mut kv = split_partition_top_level(entry, '=')?;
+        // Column token (everything before the first top-level `=`).
+        let col_tok = kv.remove(0);
+        let col_tok = col_tok.trim();
+        let column = if col_tok.starts_with('`') {
+            op_unquote_ident(json!({ "quoted": col_tok }))?["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        } else {
+            col_tok.to_string()
+        };
+        if column.is_empty() {
+            return Err(anyhow!("partition entry has an empty column: {entry}"));
+        }
+        let value = if kv.is_empty() {
+            // No `=` → dynamic-partition column.
+            Value::Null
+        } else {
+            // A value may contain `=` inside a quote; rejoin the remainder.
+            let val_tok = kv.join("=");
+            let val_tok = val_tok.trim();
+            if let Some(stripped) = val_tok.strip_prefix('\'') {
+                let _ = stripped; // value is a single-quoted string literal
+                json!(op_unquote_literal(json!({ "value": val_tok }))?["value"]
+                    .as_str()
+                    .unwrap())
+            } else if let Ok(i) = val_tok.parse::<i64>() {
+                json!(i)
+            } else if let Ok(f) = val_tok.parse::<f64>() {
+                json!(f)
+            } else {
+                // Not quoted and not numeric — keep the raw token (lenient).
+                json!(val_tok)
+            }
+        };
+        partitions.push(json!({ "column": column, "value": value }));
+    }
+    Ok(json!({ "partitions": partitions }))
 }
 
 /// Quote a qualified Spark table identifier `[catalog.][database.]table`,
@@ -1369,6 +1504,11 @@ pub extern "C" fn spark__unquote_ident(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__unquote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_unquote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_partition_spec(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_partition_spec)
 }
 
 #[no_mangle]
@@ -2487,6 +2627,37 @@ mod tests {
         assert!(op_unquote_literal(json!({"value": "'a'b'"})).is_err());
         assert!(op_unquote_literal(json!({"value": "'a\\'"})).is_err());
         assert!(op_unquote_literal(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_partition_spec_inverts_build_partition_spec() {
+        let p =
+            |s: &str| op_parse_partition_spec(json!({ "spec": s })).unwrap()["partitions"].clone();
+        // Full clause: string value decoded, numeric value parsed, quoted ident unwrapped.
+        let v = p("PARTITION (region='us-east', dt=20240101, `od d`='x')");
+        assert_eq!(v[0], json!({"column": "region", "value": "us-east"}));
+        assert_eq!(v[1], json!({"column": "dt", "value": 20240101}));
+        assert_eq!(v[2], json!({"column": "od d", "value": "x"}));
+        // Bare inner list (no PARTITION wrapper) and a dynamic column (no `=`).
+        let d = p("a=1, b");
+        assert_eq!(d[0], json!({"column": "a", "value": 1}));
+        assert_eq!(d[1], json!({"column": "b", "value": Value::Null}));
+        // Commas and `=` inside a quoted value do not split it.
+        let q = p("k='a, b=c'");
+        assert_eq!(q[0], json!({"column": "k", "value": "a, b=c"}));
+        // Round-trip is exercised at the stk layer (build_partition_spec is pure-stk);
+        // here verify the escape decode matches: `\'` → `'`.
+        assert_eq!(p("x='it\\'s'")[0], json!({"column": "x", "value": "it's"}));
+        // Float value and empty spec.
+        assert_eq!(p("p=1.5")[0]["value"], json!(1.5));
+        assert_eq!(
+            op_parse_partition_spec(json!({"spec": "PARTITION ()"})).unwrap()["partitions"],
+            json!([])
+        );
+        // Errors.
+        assert!(op_parse_partition_spec(json!({"spec": "PARTITION (a=1"})).is_err());
+        assert!(op_parse_partition_spec(json!({"spec": "a=1,,b=2"})).is_err());
+        assert!(op_parse_partition_spec(json!({})).is_err());
     }
 
     #[test]
