@@ -225,6 +225,7 @@ Spark::parse_qualified_ident($name) → { name, parts, count }             # inv
 Spark::quote_ident_if_needed($name) → $quoted                            # Spark quoteIfNeeded: users → users, 1col → `1col` (quote only when not bare-legal)
 Spark::escape_like($value)          → $escaped                           # backslash-escape Spark LIKE wildcards: 100% → 100\%, a_b → a\_b, \ → \\
 Spark::unescape_like($pattern)      → $literal                          # inverse: recover the literal (100\% → 100%); rejects an unescaped wildcard or dangling backslash
+Spark::like_to_regex($pattern)      → $regex                            # Spark LIKE → anchored regex for client-side filtering: % → .*, _ → ., \%/\_/\\ literals, metachars escaped, ^…$
 ```
 
 ### Submit pass-through

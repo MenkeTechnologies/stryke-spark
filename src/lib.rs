@@ -1334,6 +1334,51 @@ fn op_unescape_like(opts: Value) -> Result<Value> {
     Ok(json!({ "value": value, "unescaped": out }))
 }
 
+/// Append `c` to `out`, backslash-escaping it if it is a regex metacharacter so it
+/// matches literally.
+fn push_regex_literal(out: &mut String, c: char) {
+    if matches!(
+        c,
+        '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
+    ) {
+        out.push('\\');
+    }
+    out.push(c);
+}
+
+/// Convert a Spark SQL `LIKE` pattern to an anchored regular expression, so a LIKE
+/// filter can be evaluated client-side. `%` becomes `.*`, `_` becomes `.`, and a
+/// backslash escapes the next character — `\%`, `\_`, `\\` are the literal `%`,
+/// `_`, `\`. Every other character is matched literally (regex metacharacters are
+/// escaped), and the result is wrapped in `^…$` since LIKE matches the whole
+/// string. An invalid escape (`\` before anything other than `%`/`_`/`\`) or a
+/// trailing backslash is rejected, matching `unescape_like`. opts: `pattern` (or
+/// `value`, required). Returns `{pattern, regex}`. Pure.
+fn op_like_to_regex(opts: Value) -> Result<Value> {
+    let pattern = opts
+        .get("pattern")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing pattern"))?;
+    let mut re = String::with_capacity(pattern.len() + 2);
+    re.push('^');
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => re.push_str(".*"),
+            '_' => re.push('.'),
+            '\\' => match chars.next() {
+                Some(n @ ('\\' | '%' | '_')) => push_regex_literal(&mut re, n),
+                Some(n) => return Err(anyhow!("invalid LIKE escape sequence `\\{n}`")),
+                None => return Err(anyhow!("dangling escape: trailing backslash")),
+            },
+            other => push_regex_literal(&mut re, other),
+        }
+    }
+    re.push('$');
+    Ok(json!({ "pattern": pattern, "regex": re }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1534,6 +1579,11 @@ pub extern "C" fn spark__escape_like(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__unescape_like(args: *const c_char) -> *const c_char {
     ffi_call(args, op_unescape_like)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__like_to_regex(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_like_to_regex)
 }
 
 #[cfg(test)]
@@ -2786,5 +2836,37 @@ mod tests {
         assert!(op_unescape_like(json!({ "value": "trail\\" })).is_err());
         assert!(op_unescape_like(json!({ "value": "a\\b" })).is_err());
         assert!(op_unescape_like(json!({})).is_err());
+    }
+
+    #[test]
+    fn like_to_regex_maps_wildcards_and_escapes_literals() {
+        let r = |s: &str| {
+            op_like_to_regex(json!({ "pattern": s })).unwrap()["regex"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // % → .*, _ → ., anchored.
+        assert_eq!(r("a%b_c"), "^a.*b.c$");
+        // Escaped wildcards become literals (% and _ are not regex metachars).
+        assert_eq!(r("100\\%"), "^100%$");
+        assert_eq!(r("a\\_b"), "^a_b$");
+        // \\ is a literal backslash (a regex metachar → escaped).
+        assert_eq!(r("a\\\\b"), "^a\\\\b$");
+        // Regex metacharacters in the literal text are escaped, not interpreted.
+        assert_eq!(r("a.b(c)"), "^a\\.b\\(c\\)$");
+        // Empty pattern matches only the empty string.
+        assert_eq!(r(""), "^$");
+        // The produced regex actually matches what LIKE would (sanity via `regex`
+        // crate is not a dep here, so just check the structure for a prefix match).
+        assert_eq!(r("foo%"), "^foo.*$");
+        // `value` alias; invalid escape, trailing backslash, missing arg error.
+        assert_eq!(
+            op_like_to_regex(json!({ "value": "x%" })).unwrap()["regex"],
+            json!("^x.*$")
+        );
+        assert!(op_like_to_regex(json!({ "pattern": "a\\b" })).is_err());
+        assert!(op_like_to_regex(json!({ "pattern": "trail\\" })).is_err());
+        assert!(op_like_to_regex(json!({})).is_err());
     }
 }

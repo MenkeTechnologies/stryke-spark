@@ -171,6 +171,15 @@ assert_eq Spark::unescape_like(Spark::escape_like("50%_off\\sale")), "50%_off\\s
 assert_dies fn { Spark::unescape_like("a%b") },    "unescape_like: rejects an unescaped wildcard"
 assert_dies fn { Spark::unescape_like("trail\\") }, "unescape_like: rejects a dangling backslash"
 
+# like_to_regex: convert a Spark LIKE pattern to an anchored regex.
+assert_eq Spark::like_to_regex("a%b_c"), "^a.*b.c\$",  "like_to_regex: % → .*, _ → ., anchored"
+assert_eq Spark::like_to_regex("100\\%"), "^100%\$",   "like_to_regex: escaped percent is a literal"
+assert_eq Spark::like_to_regex("a\\\\b"), "^a\\\\b\$", "like_to_regex: doubled backslash is a literal backslash"
+assert_eq Spark::like_to_regex("a.b(c)"), "^a\\.b\\(c\\)\$", "like_to_regex: regex metacharacters in literals are escaped"
+assert_eq Spark::like_to_regex(""), "^\$",             "like_to_regex: empty pattern matches only empty string"
+assert_dies fn { Spark::like_to_regex("a\\b") },    "like_to_regex: rejects an invalid escape"
+assert_dies fn { Spark::like_to_regex("trail\\") }, "like_to_regex: rejects a trailing backslash"
+
 # quote_qualified_ident: each part backtick-quoted, backtick-aware split.
 assert_eq Spark::quote_qualified_ident("cat.db.my table"), "`cat`.`db`.`my table`", "quote_qualified_ident: three-level namespace"
 assert_eq Spark::quote_qualified_ident("events"), "`events`", "quote_qualified_ident: bare name still backticked"

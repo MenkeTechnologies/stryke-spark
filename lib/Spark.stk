@@ -447,3 +447,12 @@ fn Spark::escape_like ($value) {
 fn Spark::unescape_like ($value) {
     Spark::_decode("unescape_like", spark__unescape_like(to_json({ value => $value })))->{unescaped}
 }
+
+## Convert a Spark SQL LIKE $pattern to an anchored regular expression so a LIKE
+## filter can run client-side. % → .*, _ → ., and a backslash escapes the next
+## char (\%, \_, \\ are the literal %, _, \); every other char matches literally
+## (regex metacharacters escaped) and the result is wrapped in ^…$. An invalid
+## escape or a trailing backslash dies. Returns the regex string.
+fn Spark::like_to_regex ($pattern) {
+    Spark::_decode("like_to_regex", spark__like_to_regex(to_json({ pattern => $pattern })))->{regex}
+}
