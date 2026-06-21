@@ -61,6 +61,13 @@ exports = [
     "spark__parse_data_type",
     "spark__parse_app_id",
     "spark__split_sql_statements",
+    "spark__parse_duration",
+    "spark__build_duration",
+    "spark__parse_storage_level",
+    "spark__build_storage_level",
+    "spark__parse_maven_coordinate",
+    "spark__split_packages",
+    "spark__build_data_type",
 ]
 
 [scripts]

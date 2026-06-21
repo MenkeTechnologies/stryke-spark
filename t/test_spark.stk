@@ -252,4 +252,52 @@ assert_eq Spark::split_sql_statements("SELECT 1 /* a /* ; */ b */; SELECT 2")->{
 assert_eq Spark::split_sql_statements("SELECT `a;b`; SELECT 2")->{statements}[0], "SELECT `a;b`", "split_sql_statements: ; inside a backtick ident does not split"
 assert_eq Spark::split_sql_statements("SELECT 1;;  ;")->{count}, 1, "split_sql_statements: blank statements dropped"
 
+# parse_duration: Spark time-config string (JavaUtils.timeStringAs grammar).
+assert_eq Spark::parse_duration("30s")->{ms},   30000,   "parse_duration: 30s = 30000 ms"
+assert_eq Spark::parse_duration("5min")->{ms},  300000,  "parse_duration: 5min = 5 minutes"
+assert_eq Spark::parse_duration("5min")->{unit}, "m",    "parse_duration: min canonicalizes to m"
+assert_eq Spark::parse_duration("1h")->{ms},    3600000, "parse_duration: 1h = 1 hour"
+assert_eq Spark::parse_duration("250")->{ms},   250,     "parse_duration: bare number defaults to ms"
+assert_eq Spark::parse_duration("2000us")->{ms}, 2,      "parse_duration: 2000us = 2 ms"
+assert_dies fn { Spark::parse_duration("5y") },  "parse_duration: rejects an unknown suffix"
+assert_dies fn { Spark::parse_duration("500us") }, "parse_duration: rejects a sub-ms us value"
+
+# build_duration: inverse of parse_duration (largest evenly-dividing unit).
+assert_eq Spark::build_duration(3600000)->{string}, "1h",     "build_duration: 1 hour"
+assert_eq Spark::build_duration(90000)->{string},   "90s",    "build_duration: 90s (not evenly minutes)"
+assert_eq Spark::build_duration(1500)->{string},    "1500ms", "build_duration: 1500ms"
+assert_eq Spark::parse_duration(Spark::build_duration(86400000)->{string})->{ms}, 86400000, "build_duration: round-trips through parse_duration"
+
+# parse_storage_level: named Spark StorageLevel → flags.
+val $sl = Spark::parse_storage_level("MEMORY_AND_DISK")
+assert_eq $sl->{use_disk},      1, "parse_storage_level: MEMORY_AND_DISK uses disk"
+assert_eq $sl->{deserialized},  1, "parse_storage_level: MEMORY_AND_DISK is deserialized"
+assert_eq Spark::parse_storage_level("MEMORY_ONLY_SER_2")->{replication}, 2, "parse_storage_level: _2 means replication 2"
+assert_eq Spark::parse_storage_level("off_heap")->{use_off_heap}, 1, "parse_storage_level: OFF_HEAP (case-insensitive)"
+assert_eq Spark::parse_storage_level("none")->{name}, "NONE", "parse_storage_level: name uppercased"
+assert_dies fn { Spark::parse_storage_level("MEMORY_AND_FLASH") }, "parse_storage_level: rejects an unknown level"
+
+# build_storage_level: inverse of parse_storage_level (flags → canonical name).
+assert_eq Spark::build_storage_level(use_disk => 1, use_memory => 1, deserialized => 1)->{name}, "MEMORY_AND_DISK", "build_storage_level: flags → MEMORY_AND_DISK"
+assert_eq Spark::build_storage_level(use_disk => 1, replication => 2)->{name}, "DISK_ONLY_2", "build_storage_level: replication 2 → DISK_ONLY_2"
+assert_eq Spark::build_storage_level()->{name}, "NONE", "build_storage_level: all-false → NONE"
+assert_eq Spark::build_storage_level(%{ Spark::parse_storage_level("OFF_HEAP") })->{name}, "OFF_HEAP", "build_storage_level: round-trips parse_storage_level"
+
+# parse_maven_coordinate / split_packages: --packages Maven coords.
+val $coord = Spark::parse_maven_coordinate("org.postgresql:postgresql:42.7.1")
+assert_eq $coord->{group},    "org.postgresql", "parse_maven_coordinate: group"
+assert_eq $coord->{artifact}, "postgresql",     "parse_maven_coordinate: artifact"
+assert_eq $coord->{version},  "42.7.1",          "parse_maven_coordinate: version"
+assert_dies fn { Spark::parse_maven_coordinate("g:a") }, "parse_maven_coordinate: rejects a 2-part coordinate"
+val $pkgs = Spark::split_packages("org.postgresql:postgresql:42.7.1, com.mysql:mysql-connector-j:8.3.0")
+assert_eq $pkgs->{count}, 2, "split_packages: two coordinates"
+assert_eq $pkgs->{packages}[1]{group}, "com.mysql", "split_packages: second coordinate group"
+assert_eq Spark::split_packages("g:a:v,")->{count}, 1, "split_packages: trailing comma dropped"
+
+# build_data_type: inverse of parse_data_type.
+assert_eq Spark::build_data_type(base => "decimal", args => ["10", "2"]), "decimal(10,2)", "build_data_type: parametric scalar → (…)"
+assert_eq Spark::build_data_type(base => "map", args => ["string", "int"]), "map<string,int>", "build_data_type: generic → <…>"
+assert_eq Spark::build_data_type(base => "INT"), "int", "build_data_type: scalar lowercased, no args"
+assert_eq Spark::parse_data_type(Spark::build_data_type(base => "array", args => ["int"]))->{base}, "array", "build_data_type: round-trips through parse_data_type"
+
 test_run

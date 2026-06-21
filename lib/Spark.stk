@@ -531,3 +531,69 @@ fn Spark::parse_app_id ($id) {
 fn Spark::split_sql_statements ($sql) {
     Spark::_decode("split_sql_statements", spark__split_sql_statements(to_json({ sql => $sql })))
 }
+
+## Parse a Spark time-config string ("30s", "5min", "100ms", "1h", "2d") into a
+## hashref { value, suffix, ms, unit } — Spark's JavaUtils.timeStringAs grammar (the
+## form spark.*.timeout / spark.*.interval configs take), distinct from parse_memory
+## which handles byte sizes. Suffixes (case-insensitive): us (microseconds), ms, s,
+## m/min (both minutes), h, d; a bare number defaults to ms. `ms` is the normalized
+## integer millisecond count; a us value that is not a whole number of ms dies.
+fn Spark::parse_duration ($duration) {
+    Spark::_decode("parse_duration", spark__parse_duration(to_json({ duration => $duration })))
+}
+
+## Encode a millisecond count as a Spark time-config string — inverse of
+## parse_duration. Picks the largest time unit (d/h/m/s/ms) that divides $ms evenly
+## so parse_duration round-trips it; 0 → "0ms". Returns { value, suffix, string, ms }.
+fn Spark::build_duration ($ms) {
+    Spark::_decode("build_duration", spark__build_duration(to_json({ ms => $ms })))
+}
+
+## Parse a named Spark StorageLevel (the strings DataFrame/RDD.persist and
+## StorageLevel.fromString accept: NONE, DISK_ONLY[_2/_3], MEMORY_ONLY[_2],
+## MEMORY_ONLY_SER[_2], MEMORY_AND_DISK[_2], MEMORY_AND_DISK_SER[_2], OFF_HEAP) into
+## its flags. Case-insensitive. Returns { name, use_disk, use_memory, use_off_heap,
+## deserialized, replication }; an unknown name dies.
+fn Spark::parse_storage_level ($name) {
+    Spark::_decode("parse_storage_level", spark__parse_storage_level(to_json({ name => $name })))
+}
+
+## Resolve a StorageLevel flag tuple to its canonical Spark name — inverse of
+## parse_storage_level. %opts: use_disk, use_memory, use_off_heap, deserialized
+## (booleans, default false), replication (default 1). Booleans are passed as 1/0
+## ints so they survive the FFI bridge as the cdylib's truthy helper expects.
+## Returns { name, … }; a tuple Spark never names dies.
+fn Spark::build_storage_level (%opts) {
+    var %r
+    for val $k (qw(use_disk use_memory use_off_heap deserialized)) {
+        $r{$k} = $opts{$k} ? 1 : 0
+    }
+    $r{replication} = $opts{replication} if exists $opts{replication} && defined $opts{replication}
+    Spark::_decode("build_storage_level", spark__build_storage_level(to_json(\%r)))
+}
+
+## Parse a single Spark Maven coordinate "groupId:artifactId:version" — the unit a
+## --packages / spark.jars.packages list is built from. Each part must be non-empty.
+## Returns { group, artifact, version, coordinate }.
+fn Spark::parse_maven_coordinate ($coordinate) {
+    Spark::_decode("parse_maven_coordinate",
+        spark__parse_maven_coordinate(to_json({ coordinate => $coordinate })))
+}
+
+## Split a Spark --packages / spark.jars.packages value (comma-delimited
+## groupId:artifactId:version coordinates) into a list of parsed coordinates. Empty
+## entries (a trailing comma) are dropped; a malformed coordinate dies. Returns a
+## hashref { packages:[{ group, artifact, version, coordinate }], count }.
+fn Spark::split_packages ($packages) {
+    Spark::_decode("split_packages", spark__split_packages(to_json({ packages => $packages })))
+}
+
+## Build a Spark SQL data-type string from parts — inverse of parse_data_type. %opts:
+## base (required), args (optional arrayref). When args are present they join with ","
+## and wrap in "(…)" for parametric scalars (decimal/char/varchar) or "<…>" for the
+## generics (array/map/struct). Returns the type string; it re-parses under
+## parse_data_type to the same { base, args }.
+fn Spark::build_data_type (%opts) {
+    val $r = { base => $opts{base}, args => $opts{args} }
+    Spark::_decode("build_data_type", spark__build_data_type(to_json($r)))->{type}
+}

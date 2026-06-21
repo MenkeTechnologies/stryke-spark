@@ -235,6 +235,13 @@ Spark::build_partition_path(\@pairs) → $path                           # inver
 Spark::parse_data_type($type)      → { base, args, params }            # base type lowercased; args from trailing (…)/<…> depth-aware (decimal(10,2)→["10","2"])
 Spark::parse_app_id($id)           → { kind, id, … }                   # standalone / yarn / local application IDs broken out; unknown shape → kind "unknown"
 Spark::split_sql_statements($sql)  → \%{ statements:[…], count }       # split on top-level ";", ignoring ";" in '…'/"…"/`…`/-- /* … */; blanks dropped
+Spark::parse_duration($duration)   → { value, suffix, ms, unit }       # Spark time config 30s/5min/100ms/1h/2d → ms (JavaUtils.timeStringAs: us/ms/s/m/min/h/d; bare = ms)
+Spark::build_duration($ms)         → { value, suffix, string, ms }     # ms → Spark time string (largest unit that divides evenly); inverse of parse_duration
+Spark::parse_storage_level($name)  → { name, use_disk, use_memory, use_off_heap, deserialized, replication }  # named StorageLevel (MEMORY_AND_DISK, OFF_HEAP, …_2) → flags
+Spark::build_storage_level(%opts)  → { name, … }                       # inverse: { use_disk, use_memory, use_off_heap, deserialized, replication } flags → canonical name
+Spark::parse_maven_coordinate($coord) → { group, artifact, version, coordinate }  # one --packages coord groupId:artifactId:version → parts
+Spark::split_packages($packages)   → \%{ packages:[{group,artifact,version,coordinate}], count }  # comma-delimited --packages / spark.jars.packages list → coords
+Spark::build_data_type(%opts)      → $type                             # inverse of parse_data_type: { base, args } → decimal(10,2) / map<string,int>; (…) scalars, <…> generics
 ```
 
 ### Submit pass-through

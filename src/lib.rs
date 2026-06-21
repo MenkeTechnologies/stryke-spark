@@ -606,6 +606,25 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
 
 // ── pure helpers (no Spark) ──────────────────────────────────────────────────
 
+/// Coerce an FFI arg slot to a boolean. stryke's JSON bridge does not always send
+/// a real JSON `true`/`false` for a stryke boolean — `\1`/`\0` and `key => 1`
+/// arrive as the number `1`/`0` and a stringified flag arrives as text — so accept
+/// a JSON bool, a non-zero number, or a truthy string (`1`/`true`/`yes`/`on`,
+/// case-insensitive). `null`/absent is false.
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+        Some(Value::String(s)) => {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Parse a Spark master URL into its parts. Handles `local`, `local[N]`,
 /// `local[*]`, `yarn`, `spark://host:port[,host:port]` (standalone HA), and
 /// scheme-prefixed forms (`k8s://…`, `mesos://…`). Pure.
@@ -1834,6 +1853,291 @@ fn op_split_sql_statements(opts: Value) -> Result<Value> {
     Ok(json!({ "statements": statements, "count": count }))
 }
 
+/// The millisecond multiplier for a Spark time-config suffix. Spark's
+/// `JavaUtils.timeStringAs` recognizes `us`/`ms`/`s`/`m`/`min`/`h`/`d`
+/// (case-insensitive); note `m` and `min` are BOTH minutes. `us` (microseconds)
+/// is sub-millisecond so it has no whole-ms multiplier and is handled by the
+/// caller. Returns `None` for an unknown suffix.
+fn duration_ms_multiplier(suffix: &str) -> Option<u64> {
+    Some(match suffix {
+        "ms" => 1,
+        "s" => 1000,
+        "m" | "min" => 60 * 1000,
+        "h" => 60 * 60 * 1000,
+        "d" => 24 * 60 * 60 * 1000,
+        _ => return None,
+    })
+}
+
+/// Parse a Spark time-config string (`30s`, `5min`, `100ms`, `1h`, `2d`) into its
+/// parts and a normalized millisecond count. This is Spark's
+/// `JavaUtils.timeStringAs` grammar — the form `spark.*.timeout` /
+/// `spark.*.interval` configs take — and is distinct from `parse_memory`, which
+/// handles BYTE sizes. Suffixes (case-insensitive): `us` (microseconds), `ms`,
+/// `s`, `m`/`min` (both minutes), `h`, `d`. A bare number defaults to `ms`, the
+/// default Spark applies for unsuffixed timeout values. A `us` value that is not a
+/// whole number of milliseconds is rejected (the normalized output is integer ms).
+/// opts: `duration` (or `time`, required). Returns `{value, suffix, ms, unit}`
+/// (`unit` is the canonical suffix; for `us` input it stays `us`). Pure.
+fn op_parse_duration(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("duration")
+        .or_else(|| opts.get("time"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing duration"))?;
+    let s = raw.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, suffix) = s.split_at(split);
+    if num.is_empty() {
+        return Err(anyhow!("Spark time `{s}` has no numeric value"));
+    }
+    let value: u64 = num.parse()?;
+    let suffix = suffix.trim().to_ascii_lowercase();
+    if suffix == "us" {
+        if !value.is_multiple_of(1000) {
+            return Err(anyhow!(
+                "`{s}` is not a whole number of milliseconds ({value}us)"
+            ));
+        }
+        return Ok(json!({"value": value, "suffix": "us", "ms": value / 1000, "unit": "us"}));
+    }
+    let unit = if suffix.is_empty() { "ms" } else { &suffix };
+    let mult = duration_ms_multiplier(unit)
+        .ok_or_else(|| anyhow!("unknown Spark time suffix `{suffix}`"))?;
+    let ms = value
+        .checked_mul(mult)
+        .ok_or_else(|| anyhow!("duration overflows u64 ms: `{s}`"))?;
+    // `m` and `min` both mean minutes; canonicalize the reported unit to `m`.
+    let canon = if unit == "min" { "m" } else { unit };
+    Ok(json!({"value": value, "suffix": suffix, "ms": ms, "unit": canon}))
+}
+
+/// Encode a millisecond count as a Spark time-config string — the inverse of
+/// `parse_duration`. Picks the largest time unit (`d`→`h`→`m`→`s`→`ms`) that
+/// divides the count evenly, so `parse_duration` round-trips it; `0` gives
+/// `"0ms"`. Emits the short suffix Spark config accepts. opts: `ms` (required).
+/// Returns `{value, suffix, string, ms}`. Pure.
+fn op_build_duration(opts: Value) -> Result<Value> {
+    let ms = opts
+        .get("ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing ms"))?;
+    if ms == 0 {
+        return Ok(json!({"value": 0, "suffix": "ms", "string": "0ms", "ms": 0}));
+    }
+    // Largest unit first; the first that divides evenly wins.
+    let units: [(u64, &str); 5] = [
+        (24 * 60 * 60 * 1000, "d"),
+        (60 * 60 * 1000, "h"),
+        (60 * 1000, "m"),
+        (1000, "s"),
+        (1, "ms"),
+    ];
+    for (mult, suffix) in units {
+        if ms.is_multiple_of(mult) {
+            let value = ms / mult;
+            return Ok(json!({
+                "value": value,
+                "suffix": suffix,
+                "string": format!("{value}{suffix}"),
+                "ms": ms,
+            }));
+        }
+    }
+    unreachable!("the 1-ms unit divides every count")
+}
+
+/// The five `StorageLevel(useDisk, useMemory, useOffHeap, deserialized,
+/// replication)` flag tuples for Spark's named persistence levels, keyed by name.
+/// Mirrors `org.apache.spark.storage.StorageLevel`'s companion-object constants.
+fn storage_level_flags(name: &str) -> Option<(bool, bool, bool, bool, u64)> {
+    Some(match name {
+        "NONE" => (false, false, false, false, 1),
+        "DISK_ONLY" => (true, false, false, false, 1),
+        "DISK_ONLY_2" => (true, false, false, false, 2),
+        "DISK_ONLY_3" => (true, false, false, false, 3),
+        "MEMORY_ONLY" => (false, true, false, true, 1),
+        "MEMORY_ONLY_2" => (false, true, false, true, 2),
+        "MEMORY_ONLY_SER" => (false, true, false, false, 1),
+        "MEMORY_ONLY_SER_2" => (false, true, false, false, 2),
+        "MEMORY_AND_DISK" => (true, true, false, true, 1),
+        "MEMORY_AND_DISK_2" => (true, true, false, true, 2),
+        "MEMORY_AND_DISK_SER" => (true, true, false, false, 1),
+        "MEMORY_AND_DISK_SER_2" => (true, true, false, false, 2),
+        "OFF_HEAP" => (true, true, true, false, 1),
+        _ => return None,
+    })
+}
+
+/// Parse a named Spark `StorageLevel` (the strings `DataFrame.persist` /
+/// `RDD.persist` and `StorageLevel.fromString` accept) into its flags. Names match
+/// `org.apache.spark.storage.StorageLevel`'s constants: `NONE`, `DISK_ONLY[_2/_3]`,
+/// `MEMORY_ONLY[_2]`, `MEMORY_ONLY_SER[_2]`, `MEMORY_AND_DISK[_2]`,
+/// `MEMORY_AND_DISK_SER[_2]`, `OFF_HEAP`. The lookup is case-insensitive on a
+/// trimmed name. opts: `name` (or `level`, required). Returns `{name, use_disk,
+/// use_memory, use_off_heap, deserialized, replication}`; an unknown name errors.
+/// Pure.
+fn op_parse_storage_level(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("name")
+        .or_else(|| opts.get("level"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let name = raw.trim().to_ascii_uppercase();
+    let (use_disk, use_memory, use_off_heap, deserialized, replication) =
+        storage_level_flags(&name).ok_or_else(|| anyhow!("unknown StorageLevel `{raw}`"))?;
+    Ok(json!({
+        "name": name,
+        "use_disk": use_disk,
+        "use_memory": use_memory,
+        "use_off_heap": use_off_heap,
+        "deserialized": deserialized,
+        "replication": replication,
+    }))
+}
+
+/// Resolve a `StorageLevel` flag tuple to its canonical Spark name — the inverse of
+/// `parse_storage_level`. opts: `use_disk`, `use_memory`, `use_off_heap`,
+/// `deserialized` (booleans, default false), `replication` (default 1). Booleans
+/// are read with the FFI-safe `truthy` so `\1`/`key => 1` arrive correctly.
+/// Returns `{name, …flags}`; a tuple that matches no named level errors (Spark
+/// only names this fixed set). Pure.
+fn op_build_storage_level(opts: Value) -> Result<Value> {
+    let use_disk = truthy(opts.get("use_disk"));
+    let use_memory = truthy(opts.get("use_memory"));
+    let use_off_heap = truthy(opts.get("use_off_heap"));
+    let deserialized = truthy(opts.get("deserialized"));
+    let replication = opts.get("replication").and_then(Value::as_u64).unwrap_or(1);
+    let want = (
+        use_disk,
+        use_memory,
+        use_off_heap,
+        deserialized,
+        replication,
+    );
+    let names = [
+        "NONE",
+        "DISK_ONLY",
+        "DISK_ONLY_2",
+        "DISK_ONLY_3",
+        "MEMORY_ONLY",
+        "MEMORY_ONLY_2",
+        "MEMORY_ONLY_SER",
+        "MEMORY_ONLY_SER_2",
+        "MEMORY_AND_DISK",
+        "MEMORY_AND_DISK_2",
+        "MEMORY_AND_DISK_SER",
+        "MEMORY_AND_DISK_SER_2",
+        "OFF_HEAP",
+    ];
+    for name in names {
+        if storage_level_flags(name) == Some(want) {
+            return Ok(json!({
+                "name": name,
+                "use_disk": use_disk,
+                "use_memory": use_memory,
+                "use_off_heap": use_off_heap,
+                "deserialized": deserialized,
+                "replication": replication,
+            }));
+        }
+    }
+    Err(anyhow!(
+        "no named StorageLevel matches (use_disk={use_disk}, use_memory={use_memory}, \
+         use_off_heap={use_off_heap}, deserialized={deserialized}, replication={replication})"
+    ))
+}
+
+/// Parse a single Spark Maven coordinate (`groupId:artifactId:version`) — the unit
+/// Spark's `--packages` / `spark.jars.packages` list is built from. Each part must
+/// be non-empty. opts: `coordinate` (or `coord`, required). Returns `{group,
+/// artifact, version, coordinate}`. Pure.
+fn op_parse_maven_coordinate(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("coordinate")
+        .or_else(|| opts.get("coord"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing coordinate"))?;
+    let coord = raw.trim();
+    let parts: Vec<&str> = coord.split(':').collect();
+    if parts.len() != 3 {
+        return Err(anyhow!(
+            "Maven coordinate must be `groupId:artifactId:version`: `{coord}`"
+        ));
+    }
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(anyhow!(
+            "Maven coordinate has an empty part: `{coord}` (need groupId:artifactId:version)"
+        ));
+    }
+    Ok(json!({
+        "group": parts[0],
+        "artifact": parts[1],
+        "version": parts[2],
+        "coordinate": coord,
+    }))
+}
+
+/// Split a Spark `--packages` / `spark.jars.packages` value into its Maven
+/// coordinates. Spark takes a comma-delimited list of `groupId:artifactId:version`
+/// coordinates (`extractMavenCoordinates`); each is parsed like
+/// `parse_maven_coordinate`. Surrounding whitespace and empty entries (a trailing
+/// comma) are dropped. opts: `packages` (or `coordinates`, required). Returns
+/// `{packages:[{group, artifact, version, coordinate}], count}`; a malformed
+/// coordinate errors. Pure.
+fn op_split_packages(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("packages")
+        .or_else(|| opts.get("coordinates"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing packages"))?;
+    let mut packages = Vec::new();
+    for entry in raw.split(',') {
+        let coord = entry.trim();
+        if coord.is_empty() {
+            continue;
+        }
+        packages.push(op_parse_maven_coordinate(json!({ "coordinate": coord }))?);
+    }
+    let count = packages.len();
+    Ok(json!({ "packages": packages, "count": count }))
+}
+
+/// Build a Spark SQL data-type string from parts — the inverse of
+/// `parse_data_type`. `base` is the type name; `args` (optional array) are the
+/// parameters: when present they are joined with `,` and wrapped in `(…)` for the
+/// known parametric scalar types (`decimal`/`dec`/`numeric`, `char`, `varchar`) or
+/// `<…>` for the generics (`array`/`map`/`struct`). opts: `base` (required), `args`
+/// (optional array of strings/numbers). Returns `{type}`. The result re-parses
+/// under `parse_data_type` to the same `{base, args}`. Pure.
+fn op_build_data_type(opts: Value) -> Result<Value> {
+    let base = opts
+        .get("base")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing base"))?
+        .to_ascii_lowercase();
+    let args: Vec<String> = match opts.get("args") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect(),
+        Some(_) => return Err(anyhow!("args must be an array")),
+    };
+    if args.is_empty() {
+        return Ok(json!({ "type": base }));
+    }
+    // `(…)` for parametric scalar types; `<…>` for the generic containers.
+    let generic = matches!(base.as_str(), "array" | "map" | "struct");
+    let (open, close) = if generic { ('<', '>') } else { ('(', ')') };
+    Ok(json!({ "type": format!("{base}{open}{}{close}", args.join(",")) }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -2084,6 +2388,41 @@ pub extern "C" fn spark__parse_app_id(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__split_sql_statements(args: *const c_char) -> *const c_char {
     ffi_call(args, op_split_sql_statements)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_duration(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_duration)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_duration(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_duration)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_storage_level(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_storage_level)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_storage_level(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_storage_level)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_maven_coordinate(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_maven_coordinate)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__split_packages(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_split_packages)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_data_type(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_data_type)
 }
 
 #[cfg(test)]
@@ -3630,5 +3969,211 @@ mod tests {
             json!(0)
         );
         assert!(op_split_sql_statements(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_duration_maps_spark_time_suffixes_and_normalizes_ms() {
+        let s = op_parse_duration(json!({"duration": "30s"})).unwrap();
+        assert_eq!(s["ms"], json!(30000));
+        assert_eq!(s["unit"], json!("s"));
+        // `m` and `min` both mean minutes; the reported unit canonicalizes to `m`.
+        assert_eq!(
+            op_parse_duration(json!({"duration": "5m"})).unwrap()["ms"],
+            json!(300000)
+        );
+        let mn = op_parse_duration(json!({"duration": "5min"})).unwrap();
+        assert_eq!(mn["ms"], json!(300000));
+        assert_eq!(mn["unit"], json!("m"));
+        assert_eq!(
+            op_parse_duration(json!({"duration": "100ms"})).unwrap()["ms"],
+            json!(100)
+        );
+        assert_eq!(
+            op_parse_duration(json!({"duration": "1h"})).unwrap()["ms"],
+            json!(3600000)
+        );
+        assert_eq!(
+            op_parse_duration(json!({"duration": "2d"})).unwrap()["ms"],
+            json!(172800000)
+        );
+        // Bare number defaults to ms (Spark's default for unsuffixed timeouts).
+        let bare = op_parse_duration(json!({"duration": "250"})).unwrap();
+        assert_eq!(bare["ms"], json!(250));
+        assert_eq!(bare["unit"], json!("ms"));
+        // Microseconds: 2000us = 2ms; a sub-ms us value is rejected.
+        assert_eq!(
+            op_parse_duration(json!({"duration": "2000us"})).unwrap()["ms"],
+            json!(2)
+        );
+        assert!(op_parse_duration(json!({"duration": "500us"})).is_err());
+        // Case-insensitive suffix; unknown suffix and missing value error.
+        assert_eq!(
+            op_parse_duration(json!({"duration": "30S"})).unwrap()["ms"],
+            json!(30000)
+        );
+        assert!(op_parse_duration(json!({"duration": "5y"})).is_err());
+        assert!(op_parse_duration(json!({"duration": "s"})).is_err());
+        assert!(op_parse_duration(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_duration_round_trips_parse_duration() {
+        // Largest evenly-dividing unit wins.
+        let h = op_build_duration(json!({"ms": 3600000})).unwrap();
+        assert_eq!(h["string"], json!("1h"));
+        assert_eq!(
+            op_build_duration(json!({"ms": 172800000})).unwrap()["string"],
+            json!("2d")
+        );
+        assert_eq!(
+            op_build_duration(json!({"ms": 90000})).unwrap()["string"],
+            json!("90s")
+        );
+        assert_eq!(
+            op_build_duration(json!({"ms": 1500})).unwrap()["string"],
+            json!("1500ms")
+        );
+        assert_eq!(
+            op_build_duration(json!({"ms": 0})).unwrap()["string"],
+            json!("0ms")
+        );
+        // Round-trip: build → parse recovers the ms count.
+        for ms in [1u64, 999, 1000, 60000, 86400000, 123456] {
+            let s = op_build_duration(json!({ "ms": ms })).unwrap();
+            let back = op_parse_duration(json!({ "duration": s["string"] })).unwrap();
+            assert_eq!(
+                back["ms"],
+                json!(ms),
+                "round-trip failed for {ms}ms -> {}",
+                s["string"]
+            );
+        }
+        assert!(op_build_duration(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_storage_level_matches_spark_named_constants() {
+        let m = op_parse_storage_level(json!({"name": "MEMORY_AND_DISK"})).unwrap();
+        assert_eq!(m["use_disk"], json!(true));
+        assert_eq!(m["use_memory"], json!(true));
+        assert_eq!(m["use_off_heap"], json!(false));
+        assert_eq!(m["deserialized"], json!(true));
+        assert_eq!(m["replication"], json!(1));
+        let ser2 = op_parse_storage_level(json!({"name": "MEMORY_ONLY_SER_2"})).unwrap();
+        assert_eq!(ser2["deserialized"], json!(false));
+        assert_eq!(ser2["replication"], json!(2));
+        let off = op_parse_storage_level(json!({"name": "OFF_HEAP"})).unwrap();
+        assert_eq!(off["use_off_heap"], json!(true));
+        let none = op_parse_storage_level(json!({"name": "none"})).unwrap();
+        assert_eq!(none["name"], json!("NONE"));
+        assert_eq!(none["use_disk"], json!(false));
+        assert_eq!(none["use_memory"], json!(false));
+        // Case-insensitive; unknown name and missing arg error.
+        assert_eq!(
+            op_parse_storage_level(json!({"name": "disk_only_2"})).unwrap()["replication"],
+            json!(2)
+        );
+        assert!(op_parse_storage_level(json!({"name": "MEMORY_AND_FLASH"})).is_err());
+        assert!(op_parse_storage_level(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_storage_level_inverts_parse_and_reads_ffi_bools() {
+        // Numeric `1`/`0` (the form stryke's FFI sends for booleans) is honored.
+        let m = op_build_storage_level(json!({"use_disk": 1, "use_memory": 1, "deserialized": 1}))
+            .unwrap();
+        assert_eq!(m["name"], json!("MEMORY_AND_DISK"));
+        // Real JSON bools also work.
+        let d = op_build_storage_level(json!({"use_disk": true, "replication": 2})).unwrap();
+        assert_eq!(d["name"], json!("DISK_ONLY_2"));
+        // All-false → NONE.
+        assert_eq!(
+            op_build_storage_level(json!({})).unwrap()["name"],
+            json!("NONE")
+        );
+        // Round-trip every named level through parse → build.
+        for name in [
+            "DISK_ONLY",
+            "DISK_ONLY_3",
+            "MEMORY_ONLY",
+            "MEMORY_ONLY_2",
+            "MEMORY_ONLY_SER",
+            "MEMORY_AND_DISK_SER_2",
+            "OFF_HEAP",
+        ] {
+            let p = op_parse_storage_level(json!({ "name": name })).unwrap();
+            let b = op_build_storage_level(p.clone()).unwrap();
+            assert_eq!(b["name"], json!(name), "round-trip failed for {name}");
+        }
+        // A flag tuple Spark never names errors.
+        assert!(op_build_storage_level(json!({"use_off_heap": 1})).is_err());
+    }
+
+    #[test]
+    fn parse_maven_coordinate_splits_group_artifact_version() {
+        let c = op_parse_maven_coordinate(
+            json!({"coordinate": "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.0"}),
+        )
+        .unwrap();
+        assert_eq!(c["group"], json!("org.apache.iceberg"));
+        assert_eq!(c["artifact"], json!("iceberg-spark-runtime-3.5_2.12"));
+        assert_eq!(c["version"], json!("1.4.0"));
+        // Wrong part count and empty parts are rejected.
+        assert!(op_parse_maven_coordinate(json!({"coordinate": "g:a"})).is_err());
+        assert!(op_parse_maven_coordinate(json!({"coordinate": "g:a:v:extra"})).is_err());
+        assert!(op_parse_maven_coordinate(json!({"coordinate": "g::v"})).is_err());
+        assert!(op_parse_maven_coordinate(json!({})).is_err());
+    }
+
+    #[test]
+    fn split_packages_parses_comma_delimited_coordinates() {
+        let v = op_split_packages(json!({
+            "packages": "org.postgresql:postgresql:42.7.1, com.mysql:mysql-connector-j:8.3.0"
+        }))
+        .unwrap();
+        assert_eq!(v["count"], json!(2));
+        assert_eq!(v["packages"][0]["artifact"], json!("postgresql"));
+        assert_eq!(v["packages"][1]["group"], json!("com.mysql"));
+        // A trailing comma / empty entry is dropped.
+        assert_eq!(
+            op_split_packages(json!({"packages": "g:a:v,"})).unwrap()["count"],
+            json!(1)
+        );
+        // A malformed coordinate in the list errors.
+        assert!(op_split_packages(json!({"packages": "g:a:v, bad-coord"})).is_err());
+        assert!(op_split_packages(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_data_type_inverts_parse_data_type() {
+        assert_eq!(
+            op_build_data_type(json!({"base": "INT"})).unwrap()["type"],
+            json!("int")
+        );
+        // Parametric scalar → `(…)`.
+        assert_eq!(
+            op_build_data_type(json!({"base": "decimal", "args": ["10", "2"]})).unwrap()["type"],
+            json!("decimal(10,2)")
+        );
+        // Numbers in args are stringified.
+        assert_eq!(
+            op_build_data_type(json!({"base": "varchar", "args": [255]})).unwrap()["type"],
+            json!("varchar(255)")
+        );
+        // Generics → `<…>`.
+        assert_eq!(
+            op_build_data_type(json!({"base": "map", "args": ["string", "int"]})).unwrap()["type"],
+            json!("map<string,int>")
+        );
+        // Round-trip through parse_data_type.
+        for t in ["int", "decimal(10,2)", "array<int>", "map<string,int>"] {
+            let p = op_parse_data_type(json!({ "type": t })).unwrap();
+            let b = op_build_data_type(json!({"base": p["base"], "args": p["args"]})).unwrap();
+            let reparse = op_parse_data_type(json!({ "type": b["type"] })).unwrap();
+            assert_eq!(reparse["base"], p["base"], "base round-trip failed for {t}");
+            assert_eq!(reparse["args"], p["args"], "args round-trip failed for {t}");
+        }
+        assert!(op_build_data_type(json!({"base": "  "})).is_err());
+        assert!(op_build_data_type(json!({})).is_err());
     }
 }

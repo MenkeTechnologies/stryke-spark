@@ -79,5 +79,12 @@ assert_ok exists &Spark::build_partition_path, "Spark::build_partition_path exis
 assert_ok exists &Spark::parse_data_type, "Spark::parse_data_type exists"
 assert_ok exists &Spark::parse_app_id, "Spark::parse_app_id exists"
 assert_ok exists &Spark::split_sql_statements, "Spark::split_sql_statements exists"
+assert_ok exists &Spark::parse_duration, "Spark::parse_duration exists"
+assert_ok exists &Spark::build_duration, "Spark::build_duration exists"
+assert_ok exists &Spark::parse_storage_level, "Spark::parse_storage_level exists"
+assert_ok exists &Spark::build_storage_level, "Spark::build_storage_level exists"
+assert_ok exists &Spark::parse_maven_coordinate, "Spark::parse_maven_coordinate exists"
+assert_ok exists &Spark::split_packages, "Spark::split_packages exists"
+assert_ok exists &Spark::build_data_type, "Spark::build_data_type exists"
 
 test_run
