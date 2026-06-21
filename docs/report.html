@@ -101,7 +101,12 @@
         <div class="stat-card"><div class="stat-val cyan">opt-in</div><div class="stat-label">Tier</div></div>
         <div class="stat-card"><div class="stat-val cyan">dlopen</div><div class="stat-label">Load model</div></div>
         <div class="stat-card"><div class="stat-val">JSON-over-FFI</div><div class="stat-label">Envelope</div></div>
+        <div class="stat-card"><div class="stat-val green">64</div><div class="stat-label">Public Spark::* fns</div></div>
+        <div class="stat-card"><div class="stat-val green">57</div><div class="stat-label">spark__* FFI exports</div></div>
+        <div class="stat-card"><div class="stat-val cyan">35</div><div class="stat-label">Pure helper fns (no JVM)</div></div>
+        <div class="stat-card"><div class="stat-val">5</div><div class="stat-label">Runnable examples</div></div>
       </div>
+      <p class="tutorial-subtitle">Counts are from <code>lib/Spark.stk</code> (public <code>Spark::*</code> functions, of which 35 are pure in-process helpers needing no JVM), the <code>[ffi] exports</code> table in <code>stryke.toml</code>, and <code>examples/</code>. The cdylib links only <code>serde</code>, <code>serde_json</code>, <code>anyhow</code>, <code>tempfile</code>, and <code>once_cell</code> (<code>Cargo.toml</code>); the JVM, <code>spark-submit</code>, and PySpark are host requirements, not crate dependencies.</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">~</span>ARCHITECTURE</h2>
@@ -133,6 +138,28 @@
 # response shape
 {"rows": [...]} | {"value": ...} | {"ok": true}   # success — per-fn shape
 {"error": "&lt;msg&gt;"}                                # failure — wrapper die()s with the message</pre>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">=</span>PUBLIC SURFACE INVENTORY</h2>
+      <p>The 64 public <code>Spark::*</code> functions split into JVM-backed groups (each maps to a <code>spark__*</code> FFI export driven through <code>spark-submit</code>) and a pure-helper group that runs entirely in-process.</p>
+      <table class="arch-table">
+        <thead><tr><th>Group</th><th>Functions</th><th>Response shape</th></tr></thead>
+        <tbody>
+          <tr><td>Read paths</td><td><code>query</code>, <code>query_stream</code>, <code>query_one</code>, <code>query_col</code>, <code>query_scalar</code>, <code>dump</code>, <code>count</code></td><td><code>{rows:[…]}</code> &rarr; rows; scalar/col/one derived stryke-side; <code>count</code> composes <code>query_scalar</code></td></tr>
+          <tr><td>DDL / DML</td><td><code>execute</code>, <code>explain</code></td><td><code>{ok:true}</code> ack; <code>explain</code> returns <code>{plan}</code></td></tr>
+          <tr><td>External I/O</td><td><code>read</code>, <code>write</code></td><td><code>{rows:[…]}</code>; <code>{ok, …}</code></td></tr>
+          <tr><td>Metadata</td><td><code>ping</code>, <code>tables</code>, <code>databases</code>, <code>schema</code>, <code>columns</code>, <code>functions</code>, <code>version</code></td><td><code>{ok}</code> / <code>{rows:[…]}</code> / <code>{version}</code></td></tr>
+          <tr><td>Catalog + session</td><td><code>views</code>, <code>catalogs</code>, <code>current_database</code>, <code>create_temp_view</code>, <code>drop_temp_view</code>, <code>set_database</code>, <code>refresh_table</code></td><td><code>{rows:[…]}</code> / <code>{database}</code> / <code>{ok, …}</code></td></tr>
+          <tr><td>Caching + config</td><td><code>cache</code>, <code>uncache</code>, <code>config</code></td><td><code>{ok, cached|uncached}</code>; <code>{value}</code> or <code>{ok}</code></td></tr>
+          <tr><td>Submit</td><td><code>submit</code></td><td><code>{exit_code, output}</code></td></tr>
+          <tr><td>Pure helpers (no JVM)</td><td>35 fns: <code>parse_*</code> / <code>build_*</code> for master URLs, table/qualified idents, string literals, LIKE patterns, memory sizes, durations, partitions, confs, data types, storage levels, Maven coords, JDBC URLs, app IDs, SQL statement splitting</td><td>parser hashref &harr; builder string; every <code>parse_*</code> has an inverse <code>build_*</code></td></tr>
+        </tbody>
+      </table>
+      <p>Five of the pure helpers (<code>quote_literal</code>, <code>build_partition_spec</code>, <code>build_partition_path</code>, <code>build_storage_level</code>, <code>build_data_type</code>) are implemented pure-stk &mdash; their backslash-bearing output would be mangled crossing the JSON FFI, so they compose other helpers in <code>lib/Spark.stk</code> rather than calling a <code>spark__*</code> op. That is why the public count (64) exceeds the FFI export count (57).</p>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">@</span>JDK + RUNTIME REQUIREMENTS</h2>
+      <p>Spark 4.x officially supports JDK 17; JDK 21+ trips a <code>getSubject is not supported</code> error in the Hive catalog path even under <code>local[*]</code>. The cdylib defaults to <code>--conf spark.sql.catalogImplementation=in-memory</code> to dodge Hive, but a JDK 17 environment is smoothest &mdash; set <code>JAVA_HOME</code> before running. <code>spark-submit</code> must be reachable (via <code>brew install apache-spark</code>, a distro package, or a tarball with <code>$SPARK_HOME</code> set). Each call boots a fresh JVM / <code>SparkSession</code> (~5&ndash;10s warmup); local runs write a <code>./spark-warehouse/</code> and <code>metastore_db/</code> in the cwd (both gitignored). Batch into one query with CTEs / temp views to amortize the single submit.</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">/</span>SCOPE</h2>
