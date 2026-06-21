@@ -105,14 +105,14 @@ export JAVA_HOME=/path/to/jdk-17     # e.g. corretto-17, temurin-17
 use Spark
 
 # Plain query — defaults to --master local[*].
-my @rows = Spark::query "
+val @rows = Spark::query "
     SELECT id, id * 2 AS doubled
     FROM range(5)
 "
 @rows |> ep
 
 # Against a remote cluster.
-my @rows = Spark::query "SELECT * FROM events WHERE day = '2026-01-01'",
+val @rows = Spark::query "SELECT * FROM events WHERE day = '2026-01-01'",
                         master => "spark://cluster:7077",
                         confs  => { "spark.executor.memory" => "8g",
                                     "spark.executor.cores"  => "4" }
