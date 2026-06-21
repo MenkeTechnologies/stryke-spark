@@ -225,6 +225,16 @@ Spark::parse_qualified_ident($name) → { name, parts, count }             # inv
 Spark::quote_ident_if_needed($name) → $quoted                            # Spark quoteIfNeeded: users → users, 1col → `1col` (quote only when not bare-legal)
 Spark::escape_like($value)          → $escaped                           # backslash-escape Spark LIKE wildcards: 100% → 100\%, a_b → a\_b, \ → \\
 Spark::unescape_like($pattern)      → $literal                          # inverse: recover the literal (100\% → 100%); rejects an unescaped wildcard or dangling backslash
+Spark::parse_jdbc_url($url)         → { subprotocol, subname, host, port, database, params }  # jdbc:<sub>:<subname>; //host[:port][/db][?k=v] broken out, else host/port/db null
+Spark::build_jdbc_url(%opts)        → $url                              # inverse: subprotocol + (host[,port,database,params]) | subname → jdbc URL
+Spark::parse_conf($conf)           → { key, value }                    # split a "key=value" conf line on the first "="; trims key, dies on no "=" / empty key
+Spark::build_conf(%opts)           → $line                             # inverse: key (no "=") + value (default "") → "key=value"
+Spark::merge_confs(\@confs)        → { map, confs }                    # last-wins merge of "key=value" lines (spark-submit --conf dedup); first-seen key order
+Spark::parse_partition_path($path) → \%{ partitions:[{column,value}] } # split ".../year=2024/month=01/" into col=value segments (prefix + trailing file skipped)
+Spark::build_partition_path(\@pairs) → $path                           # inverse: ordered [col,val] pairs → "col=val/…" path
+Spark::parse_data_type($type)      → { base, args, params }            # base type lowercased; args from trailing (…)/<…> depth-aware (decimal(10,2)→["10","2"])
+Spark::parse_app_id($id)           → { kind, id, … }                   # standalone / yarn / local application IDs broken out; unknown shape → kind "unknown"
+Spark::split_sql_statements($sql)  → \%{ statements:[…], count }       # split on top-level ";", ignoring ";" in '…'/"…"/`…`/-- /* … */; blanks dropped
 ```
 
 ### Submit pass-through

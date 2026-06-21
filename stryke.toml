@@ -51,6 +51,16 @@ exports = [
     "spark__quote_ident_if_needed",
     "spark__escape_like",
     "spark__unescape_like",
+    "spark__parse_jdbc_url",
+    "spark__build_jdbc_url",
+    "spark__parse_conf",
+    "spark__build_conf",
+    "spark__merge_confs",
+    "spark__parse_partition_path",
+    "spark__build_partition_path",
+    "spark__parse_data_type",
+    "spark__parse_app_id",
+    "spark__split_sql_statements",
 ]
 
 [scripts]

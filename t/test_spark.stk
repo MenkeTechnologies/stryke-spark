@@ -193,4 +193,63 @@ assert_eq Spark::quote_ident_if_needed("1col"),  "`1col`", "quote_ident_if_neede
 assert_eq Spark::quote_ident_if_needed("my col"), "`my col`", "quote_ident_if_needed: space forces quoting"
 assert_eq Spark::quote_ident_if_needed("a.b"),   "`a.b`",  "quote_ident_if_needed: dot forces quoting"
 
+# parse_jdbc_url: break a JDBC URL into its parts.
+val $jdbc = Spark::parse_jdbc_url("jdbc:postgresql://db.host:5432/shop?user=fred&sslmode=require")
+assert_eq $jdbc->{subprotocol}, "postgresql",     "parse_jdbc_url: subprotocol"
+assert_eq $jdbc->{host},        "db.host",         "parse_jdbc_url: host"
+assert_eq $jdbc->{port},        5432,              "parse_jdbc_url: port"
+assert_eq $jdbc->{database},    "shop",            "parse_jdbc_url: database"
+assert_eq $jdbc->{params}{user}, "fred",           "parse_jdbc_url: query param"
+assert_eq Spark::parse_jdbc_url("jdbc:sqlite:/abs/path.db")->{subname}, "/abs/path.db", "parse_jdbc_url: opaque subname kept"
+assert_dies fn { Spark::parse_jdbc_url("postgresql://h/d") }, "parse_jdbc_url: rejects a non-jdbc URL"
+
+# build_jdbc_url: inverse of parse_jdbc_url.
+assert_eq Spark::build_jdbc_url(subprotocol => "postgresql", host => "h", port => 5432, database => "shop"), "jdbc:postgresql://h:5432/shop", "build_jdbc_url: host form"
+assert_eq Spark::build_jdbc_url(subprotocol => "sqlite", subname => "/abs/path.db"), "jdbc:sqlite:/abs/path.db", "build_jdbc_url: opaque subname form"
+assert_dies fn { Spark::build_jdbc_url(host => "h") }, "build_jdbc_url: requires a subprotocol"
+
+# parse_conf / build_conf: a single conf line.
+assert_eq Spark::parse_conf("spark.executor.memory=4g")->{value}, "4g", "parse_conf: value"
+assert_eq Spark::parse_conf("spark.x=a=b")->{value}, "a=b", "parse_conf: splits on first = only"
+assert_eq Spark::build_conf(key => "spark.cores.max", value => "8"), "spark.cores.max=8", "build_conf: key=value"
+assert_eq Spark::build_conf(key => Spark::parse_conf("k=a=b")->{key}, value => Spark::parse_conf("k=a=b")->{value}), "k=a=b", "build_conf: round-trips parse_conf"
+assert_dies fn { Spark::parse_conf("noequals") }, "parse_conf: rejects a line with no ="
+
+# merge_confs: last-wins over duplicate keys, first-seen order.
+val $merged = Spark::merge_confs(["spark.executor.memory=4g", "spark.cores.max=8", "spark.executor.memory=8g"])
+assert_eq $merged->{map}{"spark.executor.memory"}, "8g", "merge_confs: last value wins"
+assert_eq $merged->{confs}[0], "spark.executor.memory=8g", "merge_confs: deduped, first-seen order"
+assert_eq scalar(@{ $merged->{confs} }), 2, "merge_confs: two unique keys"
+
+# parse_partition_path / build_partition_path: Hive-style col=value dirs.
+val $pp = Spark::parse_partition_path("/warehouse/t/year=2024/month=01/data.parquet")
+assert_eq $pp->{partitions}[0]{column}, "year",  "parse_partition_path: first column"
+assert_eq $pp->{partitions}[1]{value},  "01",    "parse_partition_path: second value (file skipped)"
+assert_eq scalar(@{ $pp->{partitions} }), 2, "parse_partition_path: two partition segments"
+assert_eq Spark::build_partition_path([["year", 2024], ["month", "01"]]), "year=2024/month=01", "build_partition_path: joins segments"
+assert_dies fn { Spark::build_partition_path("nope") }, "build_partition_path: rejects a non-arrayref"
+
+# parse_data_type: parametric and generic types.
+val $dt = Spark::parse_data_type("decimal(10,2)")
+assert_eq $dt->{base}, "decimal",  "parse_data_type: base name"
+assert_eq $dt->{args}[1], "2",      "parse_data_type: scale arg"
+assert_eq Spark::parse_data_type("map<string,int>")->{args}[0], "string", "parse_data_type: generic key type"
+assert_eq Spark::parse_data_type("array<map<string,int>>")->{args}[0], "map<string,int>", "parse_data_type: nested generic stays whole"
+assert_eq Spark::parse_data_type("INT")->{params}, 0, "parse_data_type: scalar has no params"
+assert_dies fn { Spark::parse_data_type("array<int") }, "parse_data_type: rejects an unbalanced type"
+
+# parse_app_id: standalone / YARN / local Spark application IDs.
+assert_eq Spark::parse_app_id("application_1700000000000_0001")->{kind}, "yarn", "parse_app_id: YARN kind"
+assert_eq Spark::parse_app_id("application_1700000000000_0001")->{sequence}, "0001", "parse_app_id: YARN sequence"
+assert_eq Spark::parse_app_id("app-20240101120000-0001")->{kind}, "standalone", "parse_app_id: standalone kind"
+assert_eq Spark::parse_app_id("local-1433865536131")->{kind}, "local", "parse_app_id: local kind"
+assert_eq Spark::parse_app_id("weird-id")->{kind}, "unknown", "parse_app_id: unrecognized → unknown"
+
+# split_sql_statements: top-level ; split, quote/comment aware.
+assert_eq Spark::split_sql_statements("SELECT 1; SELECT 2;")->{count}, 2, "split_sql_statements: two statements"
+assert_eq Spark::split_sql_statements("SELECT ';' AS x; SELECT 2")->{statements}[0], "SELECT ';' AS x", "split_sql_statements: ; inside a literal does not split"
+assert_eq Spark::split_sql_statements("SELECT 1 /* a /* ; */ b */; SELECT 2")->{count}, 2, "split_sql_statements: ; inside a nested block comment does not split"
+assert_eq Spark::split_sql_statements("SELECT `a;b`; SELECT 2")->{statements}[0], "SELECT `a;b`", "split_sql_statements: ; inside a backtick ident does not split"
+assert_eq Spark::split_sql_statements("SELECT 1;;  ;")->{count}, 1, "split_sql_statements: blank statements dropped"
+
 test_run

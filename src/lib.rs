@@ -1334,6 +1334,506 @@ fn op_unescape_like(opts: Value) -> Result<Value> {
     Ok(json!({ "value": value, "unescaped": out }))
 }
 
+/// Percent-decode a JDBC URL query-parameter token (`%20` → space, `+` → space).
+/// Lenient: a malformed `%xx` (non-hex or truncated) is kept verbatim so a value
+/// that legitimately contains a bare `%` round-trips.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parse a Spark JDBC URL (`jdbc:subprotocol:subname`) into its parts. The Spark
+/// JDBC data source `url` option takes the form `jdbc:subprotocol:subname`; for
+/// the common `//host[:port]/database?k=v&…` subname the host, port, database, and
+/// percent-decoded query params are broken out. opts: `url` (required). Returns
+/// `{subprotocol, host, port, database, params, subname}` (host/port/database null
+/// when the subname isn't `//`-style). Pure.
+fn op_parse_jdbc_url(opts: Value) -> Result<Value> {
+    let url = opts
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing url"))?;
+    let rest = url
+        .strip_prefix("jdbc:")
+        .ok_or_else(|| anyhow!("not a JDBC URL (no `jdbc:` prefix): {url}"))?;
+    let (subprotocol, subname) = rest
+        .split_once(':')
+        .ok_or_else(|| anyhow!("JDBC URL missing subprotocol:subname: {url}"))?;
+    if subprotocol.is_empty() {
+        return Err(anyhow!("JDBC URL has an empty subprotocol: {url}"));
+    }
+    // Split off the query string (`?k=v&…`), then decode it.
+    let (path_part, query_part) = match subname.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (subname, None),
+    };
+    let mut params = serde_json::Map::new();
+    if let Some(q) = query_part {
+        for pair in q.split('&').filter(|p| !p.is_empty()) {
+            let (k, v) = match pair.split_once('=') {
+                Some((k, v)) => (k, v),
+                None => (pair, ""),
+            };
+            params.insert(percent_decode(k), Value::String(percent_decode(v)));
+        }
+    }
+    // The `//host[:port][/database]` host form is the common one; otherwise the
+    // subname is opaque (e.g. `jdbc:sqlite:/abs/path.db`) so host/port/db are null.
+    let (host, port, database) = if let Some(auth) = path_part.strip_prefix("//") {
+        let (hostport, db) = match auth.split_once('/') {
+            Some((hp, d)) => (hp, if d.is_empty() { None } else { Some(d) }),
+            None => (auth, None),
+        };
+        let (h, p) = match hostport.rsplit_once(':') {
+            Some((h, p)) => match p.parse::<u32>() {
+                Ok(port) => (h, Some(port)),
+                // A `:` that isn't a port (rare) — keep whole thing as host.
+                Err(_) => (hostport, None),
+            },
+            None => (hostport, None),
+        };
+        (
+            json!(h),
+            p.map(|n| json!(n)).unwrap_or(Value::Null),
+            db.map(|d| json!(d)).unwrap_or(Value::Null),
+        )
+    } else {
+        (Value::Null, Value::Null, Value::Null)
+    };
+    Ok(json!({
+        "subprotocol": subprotocol,
+        "subname": subname,
+        "host": host,
+        "port": port,
+        "database": database,
+        "params": Value::Object(params),
+    }))
+}
+
+/// Build a Spark JDBC URL from parts — the inverse of `parse_jdbc_url`. opts:
+/// `subprotocol` (required); plus EITHER `host` (+ optional `port`, `database`,
+/// `params`) to emit `jdbc:<sub>://host[:port][/db][?k=v&…]`, OR `subname` to emit
+/// the opaque `jdbc:<sub>:<subname>` form verbatim. `params` is an object whose
+/// keys are appended in iteration order (insertion order, since serde_json
+/// preserves it). Returns `{url}`. Pure.
+fn op_build_jdbc_url(opts: Value) -> Result<Value> {
+    let subprotocol = opts
+        .get("subprotocol")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing subprotocol"))?;
+    // Opaque subname form wins when no host is given.
+    if let Some(subname) = opts.get("subname").and_then(Value::as_str) {
+        if opts.get("host").and_then(Value::as_str).is_none() {
+            return Ok(json!({ "url": format!("jdbc:{subprotocol}:{subname}") }));
+        }
+    }
+    let host = opts
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("build_jdbc_url needs a `host` or a `subname`"))?;
+    let mut url = format!("jdbc:{subprotocol}://{host}");
+    if let Some(port) = opts.get("port").and_then(Value::as_u64) {
+        url.push_str(&format!(":{port}"));
+    }
+    if let Some(db) = opts
+        .get("database")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        url.push('/');
+        url.push_str(db);
+    }
+    if let Some(params) = opts.get("params").and_then(Value::as_object) {
+        let pairs: Vec<String> = params
+            .iter()
+            .map(|(k, v)| {
+                let vs = v
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| v.to_string());
+                format!("{k}={vs}")
+            })
+            .collect();
+        if !pairs.is_empty() {
+            url.push('?');
+            url.push_str(&pairs.join("&"));
+        }
+    }
+    Ok(json!({ "url": url }))
+}
+
+/// Parse a single Spark conf `key=value` line into `{key, value}`. Splits on the
+/// FIRST `=` so a value may itself contain `=` (e.g. a base64 or query string).
+/// Surrounding whitespace on the key is trimmed; the value is kept verbatim. A
+/// missing `=` is an error (a bare flag is not a conf). opts: `conf` (or `line`,
+/// required). Pure.
+fn op_parse_conf(opts: Value) -> Result<Value> {
+    let line = opts
+        .get("conf")
+        .or_else(|| opts.get("line"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing conf"))?;
+    let (key, value) = line
+        .split_once('=')
+        .ok_or_else(|| anyhow!("conf line has no `=`: {line}"))?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(anyhow!("conf line has an empty key: {line}"));
+    }
+    Ok(json!({ "key": key, "value": value }))
+}
+
+/// Build a Spark conf `key=value` line from parts — the inverse of `parse_conf`.
+/// opts: `key` (required, non-empty, must not contain `=`), `value` (defaults to
+/// the empty string). Returns `{conf}`. Pure.
+fn op_build_conf(opts: Value) -> Result<Value> {
+    let key = opts
+        .get("key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing key"))?;
+    if key.contains('=') {
+        return Err(anyhow!("conf key must not contain `=`: {key}"));
+    }
+    let value = match opts.get("value") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+    };
+    Ok(json!({ "conf": format!("{key}={value}") }))
+}
+
+/// Merge ordered Spark conf `key=value` lists with last-wins semantics — the same
+/// rule `spark-submit` applies to duplicate `--conf` keys. `confs` is an array of
+/// `key=value` strings; later entries override earlier ones for the same key. opts:
+/// `confs` (required array). Returns `{map}` (an object, last value per key) and
+/// `{confs}` (the deduped `key=value` lines in first-seen key order). Pure.
+fn op_merge_confs(opts: Value) -> Result<Value> {
+    let arr = opts
+        .get("confs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing confs (array of key=value strings)"))?;
+    // Preserve first-seen key order while taking the last value per key.
+    let mut order: Vec<String> = Vec::new();
+    let mut map = serde_json::Map::new();
+    for (i, entry) in arr.iter().enumerate() {
+        let line = entry
+            .as_str()
+            .ok_or_else(|| anyhow!("confs[{i}] is not a string"))?;
+        let (k, v) = line
+            .split_once('=')
+            .ok_or_else(|| anyhow!("confs[{i}] has no `=`: {line}"))?;
+        let k = k.trim().to_string();
+        if k.is_empty() {
+            return Err(anyhow!("confs[{i}] has an empty key: {line}"));
+        }
+        if !map.contains_key(&k) {
+            order.push(k.clone());
+        }
+        map.insert(k, Value::String(v.to_string()));
+    }
+    let confs: Vec<String> = order
+        .iter()
+        .map(|k| format!("{k}={}", map[k].as_str().unwrap()))
+        .collect();
+    Ok(json!({ "map": Value::Object(map), "confs": confs }))
+}
+
+/// Parse a Hive/Spark partition directory path into ordered `column=value` pairs.
+/// Spark partition discovery encodes each partition column as a `col=value` path
+/// segment (`…/year=2024/month=01/`). Splits on `/`, taking only `col=value`
+/// segments (a leading table prefix and a trailing file name are skipped), and
+/// stops at the first segment without an `=`. opts: `path` (required). Returns
+/// `{partitions:[{column, value}]}`. Pure.
+fn op_parse_partition_path(opts: Value) -> Result<Value> {
+    let path = opts
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let mut partitions = Vec::new();
+    let mut started = false;
+    for seg in path.split('/').filter(|s| !s.is_empty()) {
+        match seg.split_once('=') {
+            Some((col, val)) if !col.is_empty() => {
+                started = true;
+                partitions.push(json!({"column": col, "value": val}));
+            }
+            // Once partition segments begin, a non-`col=val` segment ends them
+            // (it's the data file). Before they begin it's a table-path prefix.
+            _ if started => break,
+            _ => {}
+        }
+    }
+    Ok(json!({ "partitions": partitions }))
+}
+
+/// Build a Hive/Spark partition directory path from ordered `column=value` pairs —
+/// the inverse of `parse_partition_path`. opts: `partitions` (array of
+/// `{column, value}` objects; column non-empty). Joins the segments with `/`.
+/// Returns `{path}`. Pure.
+fn op_build_partition_path(opts: Value) -> Result<Value> {
+    let parts = opts
+        .get("partitions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing partitions (array of {{column, value}})"))?;
+    let mut segs = Vec::with_capacity(parts.len());
+    for (i, p) in parts.iter().enumerate() {
+        let col = p
+            .get("column")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("partitions[{i}] missing `column`"))?;
+        let val = match p.get("value") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        };
+        segs.push(format!("{col}={val}"));
+    }
+    Ok(json!({ "path": segs.join("/") }))
+}
+
+/// Parse a Spark SQL data-type string into `{base, args}`. The base is the leading
+/// type name lowercased (`decimal`, `array`, `map`, `struct`, `int`, …); `args` is
+/// the comma-separated content of a trailing `(…)` (e.g. `decimal(10,2)` → `["10",
+/// "2"]`) or `<…>` (e.g. `array<int>` → `["int"]`, `map<string,int>` → `["string",
+/// "int"]`). Splitting is depth-aware so nested generics stay whole
+/// (`array<map<string,int>>` → `["map<string,int>"]`). A type with no parameters
+/// yields an empty `args`. opts: `type` (required). Returns `{base, args, params}`
+/// (`params` = whether any args were present). Pure.
+fn op_parse_data_type(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("type")
+        .or_else(|| opts.get("data_type"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type"))?;
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(anyhow!("empty data type"));
+    }
+    // Find the opening delimiter, if any: `(` for parametric types, `<` for generics.
+    let open = s.find(['(', '<']);
+    let (base, args): (String, Vec<String>) = match open {
+        None => (s.to_ascii_lowercase(), Vec::new()),
+        Some(i) => {
+            let open_ch = s.as_bytes()[i] as char;
+            let close_ch = if open_ch == '(' { ')' } else { '>' };
+            if !s.ends_with(close_ch) {
+                return Err(anyhow!(
+                    "data type `{s}` is missing its closing `{close_ch}`"
+                ));
+            }
+            let base = s[..i].trim().to_ascii_lowercase();
+            if base.is_empty() {
+                return Err(anyhow!("data type `{s}` has no base name"));
+            }
+            let inner = &s[i + 1..s.len() - 1];
+            (base, split_type_args(inner, open_ch, close_ch)?)
+        }
+    };
+    let params = !args.is_empty();
+    Ok(json!({ "base": base, "args": args, "params": params }))
+}
+
+/// Split a data-type arg list on top-level commas, keeping nested `(…)`/`<…>`
+/// groups intact. Tracks both delimiter kinds so `map<string,int>, decimal(10,2)`
+/// splits into two. Errors on unbalanced depth.
+fn split_type_args(inner: &str, open_ch: char, close_ch: char) -> Result<Vec<String>> {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for c in trimmed.chars() {
+        match c {
+            '(' | '<' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | '>' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(anyhow!("unbalanced `{c}` in type args"));
+                }
+                cur.push(c);
+            }
+            ',' if depth == 0 => out.push(std::mem::take(&mut cur).trim().to_string()),
+            _ => cur.push(c),
+        }
+    }
+    if depth != 0 {
+        return Err(anyhow!("unbalanced `{open_ch}`/`{close_ch}` in type args"));
+    }
+    out.push(cur.trim().to_string());
+    if out.iter().any(|a| a.is_empty()) {
+        return Err(anyhow!("empty type arg"));
+    }
+    Ok(out)
+}
+
+/// Parse a Spark application ID into `{kind, …}`. Recognizes the three IDs Spark's
+/// `SparkContext.applicationId` produces: standalone `app-<yyyyMMddHHmmss>-<NNNN>`
+/// (kind `standalone`, fields `timestamp`, `number`), YARN
+/// `application_<clusterTs>_<seq>` (kind `yarn`, fields `cluster_timestamp`,
+/// `sequence`), and `local-<millis>` (kind `local`, field `millis`). An
+/// unrecognized shape is kind `unknown`. opts: `id` (or `app_id`, required).
+/// Returns the parsed object (always including `kind` and `id`). Pure.
+fn op_parse_app_id(opts: Value) -> Result<Value> {
+    let id = opts
+        .get("id")
+        .or_else(|| opts.get("app_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing id"))?;
+    if let Some(rest) = id.strip_prefix("application_") {
+        if let Some((cluster_ts, seq)) = rest.split_once('_') {
+            if !cluster_ts.is_empty()
+                && !seq.is_empty()
+                && cluster_ts.bytes().all(|b| b.is_ascii_digit())
+                && seq.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Ok(json!({
+                    "kind": "yarn",
+                    "id": id,
+                    "cluster_timestamp": cluster_ts,
+                    "sequence": seq,
+                }));
+            }
+        }
+    }
+    if let Some(rest) = id.strip_prefix("app-") {
+        if let Some((ts, num)) = rest.rsplit_once('-') {
+            if ts.len() == 14
+                && ts.bytes().all(|b| b.is_ascii_digit())
+                && !num.is_empty()
+                && num.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Ok(json!({
+                    "kind": "standalone",
+                    "id": id,
+                    "timestamp": ts,
+                    "number": num,
+                }));
+            }
+        }
+    }
+    if let Some(millis) = id.strip_prefix("local-") {
+        if !millis.is_empty() && millis.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(json!({"kind": "local", "id": id, "millis": millis}));
+        }
+    }
+    Ok(json!({"kind": "unknown", "id": id}))
+}
+
+/// Split a multi-statement Spark SQL string on top-level `;` into individual
+/// statements. A `;` inside a `'…'` or `"…"` string literal (with `\` escapes), a
+/// `` `…` `` backtick identifier, a `-- …` line comment, or a `/* … */` bracketed
+/// comment (Spark allows nesting) does not split. Comments are preserved inside the
+/// statements; only blank/whitespace-only statements are dropped. opts: `sql`
+/// (required). Returns `{statements:[…], count}`. Pure.
+fn op_split_sql_statements(opts: Value) -> Result<Value> {
+    let sql = opts
+        .get("sql")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing sql"))?;
+    let mut statements = Vec::new();
+    let mut cur = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut block_depth: i32 = 0;
+    while let Some(c) = chars.next() {
+        // Inside a bracketed comment: consume until the (possibly nested) close.
+        if block_depth > 0 {
+            cur.push(c);
+            if c == '*' && chars.peek() == Some(&'/') {
+                cur.push(chars.next().unwrap());
+                block_depth -= 1;
+            } else if c == '/' && chars.peek() == Some(&'*') {
+                cur.push(chars.next().unwrap());
+                block_depth += 1;
+            }
+            continue;
+        }
+        match c {
+            '-' if chars.peek() == Some(&'-') => {
+                // Line comment: consume to end of line (keep the newline).
+                cur.push(c);
+                cur.push(chars.next().unwrap());
+                for n in chars.by_ref() {
+                    cur.push(n);
+                    if n == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                cur.push(c);
+                cur.push(chars.next().unwrap());
+                block_depth += 1;
+            }
+            '\'' | '"' | '`' => {
+                // Quoted run: copy verbatim until the matching close, honoring
+                // backslash escapes inside the two string-literal quotes.
+                let quote = c;
+                let escapes = quote != '`';
+                cur.push(c);
+                while let Some(q) = chars.next() {
+                    cur.push(q);
+                    if q == '\\' && escapes {
+                        if let Some(e) = chars.next() {
+                            cur.push(e);
+                        }
+                    } else if q == quote {
+                        break;
+                    }
+                }
+            }
+            ';' => {
+                if !cur.trim().is_empty() {
+                    statements.push(cur.trim().to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        statements.push(cur.trim().to_string());
+    }
+    let count = statements.len();
+    Ok(json!({ "statements": statements, "count": count }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1534,6 +2034,56 @@ pub extern "C" fn spark__escape_like(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn spark__unescape_like(args: *const c_char) -> *const c_char {
     ffi_call(args, op_unescape_like)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_jdbc_url(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_jdbc_url)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_jdbc_url(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_jdbc_url)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_conf(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_conf)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_conf(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_conf)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__merge_confs(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_merge_confs)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_partition_path(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_partition_path)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__build_partition_path(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_partition_path)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_data_type(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_data_type)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__parse_app_id(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_app_id)
+}
+
+#[no_mangle]
+pub extern "C" fn spark__split_sql_statements(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_split_sql_statements)
 }
 
 #[cfg(test)]
@@ -2786,5 +3336,299 @@ mod tests {
         assert!(op_unescape_like(json!({ "value": "trail\\" })).is_err());
         assert!(op_unescape_like(json!({ "value": "a\\b" })).is_err());
         assert!(op_unescape_like(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_jdbc_url_breaks_out_host_port_db_and_params() {
+        let v = op_parse_jdbc_url(
+            json!({"url": "jdbc:postgresql://db.host:5432/shop?user=fred&sslmode=require"}),
+        )
+        .unwrap();
+        assert_eq!(v["subprotocol"], json!("postgresql"));
+        assert_eq!(v["host"], json!("db.host"));
+        assert_eq!(v["port"], json!(5432));
+        assert_eq!(v["database"], json!("shop"));
+        assert_eq!(v["params"]["user"], json!("fred"));
+        assert_eq!(v["params"]["sslmode"], json!("require"));
+        // No port, no db.
+        let h = op_parse_jdbc_url(json!({"url": "jdbc:mysql://h/d"})).unwrap();
+        assert_eq!(h["host"], json!("h"));
+        assert_eq!(h["port"], Value::Null);
+        assert_eq!(h["database"], json!("d"));
+        // Percent / plus decoding in a value.
+        let p = op_parse_jdbc_url(json!({"url": "jdbc:postgresql://h/d?q=a%20b+c"})).unwrap();
+        assert_eq!(p["params"]["q"], json!("a b c"));
+        // Opaque subname (not `//host`): host/port/db are null, subname preserved.
+        let o = op_parse_jdbc_url(json!({"url": "jdbc:sqlite:/abs/path.db"})).unwrap();
+        assert_eq!(o["subprotocol"], json!("sqlite"));
+        assert_eq!(o["host"], Value::Null);
+        assert_eq!(o["subname"], json!("/abs/path.db"));
+        // Errors.
+        assert!(op_parse_jdbc_url(json!({"url": "postgresql://h/d"})).is_err());
+        assert!(op_parse_jdbc_url(json!({"url": "jdbc:onlyprotocol"})).is_err());
+        assert!(op_parse_jdbc_url(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_jdbc_url_inverts_parse_jdbc_url() {
+        // Full host form.
+        assert_eq!(
+            op_build_jdbc_url(
+                json!({"subprotocol": "postgresql", "host": "h", "port": 5432, "database": "shop"})
+            )
+            .unwrap()["url"],
+            json!("jdbc:postgresql://h:5432/shop")
+        );
+        // With params (insertion order preserved by preserve_order).
+        let u = op_build_jdbc_url(json!({
+            "subprotocol": "mysql",
+            "host": "h",
+            "params": {"user": "fred", "ssl": "true"},
+        }))
+        .unwrap()["url"]
+            .clone();
+        assert_eq!(u, json!("jdbc:mysql://h?user=fred&ssl=true"));
+        // Opaque subname form.
+        assert_eq!(
+            op_build_jdbc_url(json!({"subprotocol": "sqlite", "subname": "/abs/path.db"})).unwrap()
+                ["url"],
+            json!("jdbc:sqlite:/abs/path.db")
+        );
+        // Round-trips the host form (params omitted: rsplit/rejoin tested above).
+        for url in [
+            "jdbc:postgresql://h:5432/shop",
+            "jdbc:mysql://host/db",
+            "jdbc:oracle://h:1521",
+        ] {
+            let parsed = op_parse_jdbc_url(json!({ "url": url })).unwrap();
+            let rebuilt = op_build_jdbc_url(json!({
+                "subprotocol": parsed["subprotocol"],
+                "host": parsed["host"],
+                "port": parsed["port"],
+                "database": parsed["database"],
+            }))
+            .unwrap()["url"]
+                .clone();
+            assert_eq!(rebuilt, json!(url), "round-trip {url}");
+        }
+        // Errors: missing subprotocol, and no host/subname.
+        assert!(op_build_jdbc_url(json!({"host": "h"})).is_err());
+        assert!(op_build_jdbc_url(json!({"subprotocol": "x"})).is_err());
+    }
+
+    #[test]
+    fn parse_conf_splits_on_first_equals() {
+        let v = op_parse_conf(json!({"conf": "spark.executor.memory=4g"})).unwrap();
+        assert_eq!(v["key"], json!("spark.executor.memory"));
+        assert_eq!(v["value"], json!("4g"));
+        // Value may contain `=` (split on FIRST only).
+        let e = op_parse_conf(json!({"conf": "spark.x=a=b=c"})).unwrap();
+        assert_eq!(e["value"], json!("a=b=c"));
+        // Key whitespace trimmed; empty value allowed.
+        assert_eq!(
+            op_parse_conf(json!({"conf": "  k =v"})).unwrap()["key"],
+            json!("k")
+        );
+        assert_eq!(
+            op_parse_conf(json!({"conf": "k="})).unwrap()["value"],
+            json!("")
+        );
+        // Errors: no `=`, empty key, missing.
+        assert!(op_parse_conf(json!({"conf": "noequals"})).is_err());
+        assert!(op_parse_conf(json!({"conf": "=v"})).is_err());
+        assert!(op_parse_conf(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_conf_inverts_parse_conf() {
+        assert_eq!(
+            op_build_conf(json!({"key": "spark.cores.max", "value": "8"})).unwrap()["conf"],
+            json!("spark.cores.max=8")
+        );
+        // Missing value → empty.
+        assert_eq!(
+            op_build_conf(json!({"key": "k"})).unwrap()["conf"],
+            json!("k=")
+        );
+        // Non-string value coerces.
+        assert_eq!(
+            op_build_conf(json!({"key": "k", "value": 8})).unwrap()["conf"],
+            json!("k=8")
+        );
+        // Round-trips parse_conf for value-with-equals.
+        let line = "spark.x=a=b";
+        let p = op_parse_conf(json!({ "conf": line })).unwrap();
+        assert_eq!(
+            op_build_conf(json!({"key": p["key"], "value": p["value"]})).unwrap()["conf"],
+            json!(line)
+        );
+        // Errors: missing key, key with `=`.
+        assert!(op_build_conf(json!({"value": "v"})).is_err());
+        assert!(op_build_conf(json!({"key": "a=b", "value": "v"})).is_err());
+    }
+
+    #[test]
+    fn merge_confs_last_wins_in_first_seen_order() {
+        let v = op_merge_confs(json!({"confs": [
+            "spark.executor.memory=4g",
+            "spark.cores.max=8",
+            "spark.executor.memory=8g",
+        ]}))
+        .unwrap();
+        // Last value wins for the duplicate key.
+        assert_eq!(v["map"]["spark.executor.memory"], json!("8g"));
+        assert_eq!(v["map"]["spark.cores.max"], json!("8"));
+        // First-seen key order, deduped.
+        assert_eq!(
+            v["confs"],
+            json!(["spark.executor.memory=8g", "spark.cores.max=8"])
+        );
+        // Value-with-equals is preserved.
+        let e = op_merge_confs(json!({"confs": ["k=a=b"]})).unwrap();
+        assert_eq!(e["map"]["k"], json!("a=b"));
+        // Errors: not an array, a non-string entry, an entry with no `=`.
+        assert!(op_merge_confs(json!({"confs": "x"})).is_err());
+        assert!(op_merge_confs(json!({"confs": [1]})).is_err());
+        assert!(op_merge_confs(json!({"confs": ["noequals"]})).is_err());
+        assert!(op_merge_confs(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_partition_path_extracts_col_value_segments() {
+        let v = op_parse_partition_path(json!({"path": "/warehouse/t/year=2024/month=01"}))
+            .unwrap()["partitions"]
+            .clone();
+        assert_eq!(v[0], json!({"column": "year", "value": "2024"}));
+        assert_eq!(v[1], json!({"column": "month", "value": "01"}));
+        // A trailing data file ends the partition segments.
+        let f = op_parse_partition_path(json!({"path": "t/gender=male/country=US/data.parquet"}))
+            .unwrap()["partitions"]
+            .clone();
+        assert_eq!(f.as_array().unwrap().len(), 2);
+        assert_eq!(f[1], json!({"column": "country", "value": "US"}));
+        // No partition segments at all.
+        assert_eq!(
+            op_parse_partition_path(json!({"path": "/just/a/dir"})).unwrap()["partitions"],
+            json!([])
+        );
+        assert!(op_parse_partition_path(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_partition_path_inverts_parse_partition_path() {
+        assert_eq!(
+            op_build_partition_path(json!({"partitions": [
+                {"column": "year", "value": "2024"},
+                {"column": "month", "value": "01"},
+            ]}))
+            .unwrap()["path"],
+            json!("year=2024/month=01")
+        );
+        // Numeric value coerces; empty for null.
+        assert_eq!(
+            op_build_partition_path(json!({"partitions": [{"column": "y", "value": 2024}]}))
+                .unwrap()["path"],
+            json!("y=2024")
+        );
+        // Round-trips parse_partition_path (segments only).
+        let path = "year=2024/month=01/day=15";
+        let parsed = op_parse_partition_path(json!({ "path": path })).unwrap();
+        assert_eq!(
+            op_build_partition_path(json!({"partitions": parsed["partitions"]})).unwrap()["path"],
+            json!(path)
+        );
+        // Errors: not an array, missing column.
+        assert!(op_build_partition_path(json!({"partitions": [{"value": "x"}]})).is_err());
+        assert!(op_build_partition_path(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_data_type_handles_parametric_and_generic_types() {
+        // Simple scalar (no params).
+        let i = op_parse_data_type(json!({"type": "INT"})).unwrap();
+        assert_eq!(i["base"], json!("int"));
+        assert_eq!(i["args"], json!([]));
+        assert_eq!(i["params"], json!(false));
+        // Parametric: decimal(10,2).
+        let d = op_parse_data_type(json!({"type": "decimal(10,2)"})).unwrap();
+        assert_eq!(d["base"], json!("decimal"));
+        assert_eq!(d["args"], json!(["10", "2"]));
+        // Generic: array<int>, map<string,int>.
+        assert_eq!(
+            op_parse_data_type(json!({"type": "array<int>"})).unwrap()["args"],
+            json!(["int"])
+        );
+        assert_eq!(
+            op_parse_data_type(json!({"type": "map<string,int>"})).unwrap()["args"],
+            json!(["string", "int"])
+        );
+        // Nested generics stay whole at the top level.
+        let nested = op_parse_data_type(json!({"type": "array<map<string,int>>"})).unwrap();
+        assert_eq!(nested["base"], json!("array"));
+        assert_eq!(nested["args"], json!(["map<string,int>"]));
+        // Errors: unbalanced, empty, missing.
+        assert!(op_parse_data_type(json!({"type": "array<int"})).is_err());
+        assert!(op_parse_data_type(json!({"type": "decimal(10,2"})).is_err());
+        assert!(op_parse_data_type(json!({"type": "  "})).is_err());
+        assert!(op_parse_data_type(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_app_id_recognizes_yarn_standalone_local() {
+        let y = op_parse_app_id(json!({"id": "application_1700000000000_0001"})).unwrap();
+        assert_eq!(y["kind"], json!("yarn"));
+        assert_eq!(y["cluster_timestamp"], json!("1700000000000"));
+        assert_eq!(y["sequence"], json!("0001"));
+        let s = op_parse_app_id(json!({"id": "app-20240101120000-0001"})).unwrap();
+        assert_eq!(s["kind"], json!("standalone"));
+        assert_eq!(s["timestamp"], json!("20240101120000"));
+        assert_eq!(s["number"], json!("0001"));
+        let l = op_parse_app_id(json!({"id": "local-1433865536131"})).unwrap();
+        assert_eq!(l["kind"], json!("local"));
+        assert_eq!(l["millis"], json!("1433865536131"));
+        // Unrecognized shapes fall through to `unknown`.
+        assert_eq!(
+            op_parse_app_id(json!({"id": "weird-id"})).unwrap()["kind"],
+            json!("unknown")
+        );
+        // A standalone-looking prefix with a wrong-length timestamp is unknown.
+        assert_eq!(
+            op_parse_app_id(json!({"id": "app-123-1"})).unwrap()["kind"],
+            json!("unknown")
+        );
+        assert!(op_parse_app_id(json!({})).is_err());
+    }
+
+    #[test]
+    fn split_sql_statements_respects_quotes_and_comments() {
+        let v = op_split_sql_statements(json!({"sql": "SELECT 1; SELECT 2;"})).unwrap();
+        assert_eq!(v["count"], json!(2));
+        assert_eq!(v["statements"], json!(["SELECT 1", "SELECT 2"]));
+        // A `;` inside a string literal does not split.
+        let lit = op_split_sql_statements(json!({"sql": "SELECT ';' AS x; SELECT 2"})).unwrap();
+        assert_eq!(lit["count"], json!(2));
+        assert_eq!(lit["statements"][0], json!("SELECT ';' AS x"));
+        // A `;` inside a line comment does not split.
+        let lc = op_split_sql_statements(json!({"sql": "SELECT 1 -- a; b\n; SELECT 2"})).unwrap();
+        assert_eq!(lc["count"], json!(2));
+        // A `;` inside a (nested) block comment does not split.
+        let bc = op_split_sql_statements(json!({"sql": "SELECT 1 /* a /* ; */ b */; SELECT 2"}))
+            .unwrap();
+        assert_eq!(bc["count"], json!(2));
+        // A `;` inside a backtick identifier does not split.
+        let bt = op_split_sql_statements(json!({"sql": "SELECT `a;b`; SELECT 2"})).unwrap();
+        assert_eq!(bt["count"], json!(2));
+        assert_eq!(bt["statements"][0], json!("SELECT `a;b`"));
+        // Trailing `;` and blank statements are dropped.
+        assert_eq!(
+            op_split_sql_statements(json!({"sql": "SELECT 1;;  ;"})).unwrap()["count"],
+            json!(1)
+        );
+        // Empty input → no statements.
+        assert_eq!(
+            op_split_sql_statements(json!({"sql": "   "})).unwrap()["count"],
+            json!(0)
+        );
+        assert!(op_split_sql_statements(json!({})).is_err());
     }
 }

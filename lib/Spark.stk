@@ -447,3 +447,87 @@ fn Spark::escape_like ($value) {
 fn Spark::unescape_like ($value) {
     Spark::_decode("unescape_like", spark__unescape_like(to_json({ value => $value })))->{unescaped}
 }
+
+## Parse a Spark JDBC URL ("jdbc:subprotocol:subname") into a hashref. For the
+## common "//host[:port]/database?k=v&…" subname the host, port, database, and
+## percent-decoded params are broken out; an opaque subname leaves them undef and
+## keeps subname verbatim. Returns { subprotocol, host, port, database, params,
+## subname }.
+fn Spark::parse_jdbc_url ($url) {
+    Spark::_decode("parse_jdbc_url", spark__parse_jdbc_url(to_json({ url => $url })))
+}
+
+## Build a Spark JDBC URL from parts — inverse of parse_jdbc_url. %opts:
+## subprotocol (required), plus EITHER host (+ optional port, database, params =>
+## { k => v }) for the "jdbc:<sub>://host[:port][/db][?…]" form, OR subname for the
+## opaque "jdbc:<sub>:<subname>" form. Returns the URL string.
+fn Spark::build_jdbc_url (%opts) {
+    Spark::_decode("build_jdbc_url", spark__build_jdbc_url(to_json(\%opts)))->{url}
+}
+
+## Parse a Spark conf "key=value" line into a hashref { key, value }. Splits on
+## the FIRST "=" so a value may itself contain "="; the key is trimmed. Dies on a
+## line with no "=" or an empty key.
+fn Spark::parse_conf ($conf) {
+    Spark::_decode("parse_conf", spark__parse_conf(to_json({ conf => $conf })))
+}
+
+## Build a Spark conf "key=value" line — inverse of parse_conf. %opts: key
+## (required, no "="), value (defaults to ""). Returns the line string.
+fn Spark::build_conf (%opts) {
+    Spark::_decode("build_conf", spark__build_conf(to_json(\%opts)))->{conf}
+}
+
+## Merge an ordered list of Spark conf "key=value" strings with last-wins
+## semantics (the same rule spark-submit applies to duplicate --conf keys).
+## $confs is an arrayref of "key=value" strings. Returns a hashref { map =>
+## { key => last_value }, confs => [deduped lines in first-seen key order] }.
+fn Spark::merge_confs ($confs) {
+    Spark::_decode("merge_confs", spark__merge_confs(to_json({ confs => $confs })))
+}
+
+## Parse a Hive/Spark partition directory path ("…/year=2024/month=01/") into a
+## hashref { partitions:[{ column, value }] }. Splits on "/", taking the
+## "col=value" segments (a table-path prefix and a trailing data file are skipped).
+fn Spark::parse_partition_path ($path) {
+    Spark::_decode("parse_partition_path", spark__parse_partition_path(to_json({ path => $path })))
+}
+
+## Build a Hive/Spark partition directory path from ordered [column, value] pairs —
+## inverse of parse_partition_path. $pairs is an arrayref of two-element [col, val]
+## arrayrefs; joins the "col=val" segments with "/". Returns the path string.
+fn Spark::build_partition_path ($pairs) {
+    die "Spark::build_partition_path: pairs must be an arrayref" unless ref($pairs) eq "ARRAY"
+    var @parts
+    for val $pair (@$pairs) {
+        die "Spark::build_partition_path: each entry must be a [col, val] arrayref" unless ref($pair) eq "ARRAY" && @$pair >= 1
+        push @parts, { column => $pair->[0], value => (@$pair >= 2 ? $pair->[1] : undef) }
+    }
+    Spark::_decode("build_partition_path", spark__build_partition_path(to_json({ partitions => \@parts })))->{path}
+}
+
+## Parse a Spark SQL data-type string into a hashref { base, args, params }. The
+## base is the leading type name lowercased; args is the comma-separated content of
+## a trailing "(…)" (decimal(10,2) → ["10","2"]) or "<…>" (map<string,int> →
+## ["string","int"]), depth-aware so nested generics stay whole. params is whether
+## any args were present.
+fn Spark::parse_data_type ($type) {
+    Spark::_decode("parse_data_type", spark__parse_data_type(to_json({ type => $type })))
+}
+
+## Parse a Spark application ID into a hashref { kind, id, … }. Recognizes the IDs
+## SparkContext.applicationId produces: standalone "app-<yyyyMMddHHmmss>-<NNNN>"
+## (kind standalone; timestamp, number), YARN "application_<clusterTs>_<seq>" (kind
+## yarn; cluster_timestamp, sequence), and "local-<millis>" (kind local; millis).
+## An unrecognized shape is kind "unknown".
+fn Spark::parse_app_id ($id) {
+    Spark::_decode("parse_app_id", spark__parse_app_id(to_json({ id => $id })))
+}
+
+## Split a multi-statement Spark SQL string on top-level ";" into a list of
+## statements. A ";" inside a '…'/"…" string literal, a `…` backtick identifier, a
+## "-- …" line comment, or a "/* … */" (nestable) bracketed comment does not split;
+## blank statements are dropped. Returns a hashref { statements:[…], count }.
+fn Spark::split_sql_statements ($sql) {
+    Spark::_decode("split_sql_statements", spark__split_sql_statements(to_json({ sql => $sql })))
+}

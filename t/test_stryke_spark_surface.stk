@@ -69,5 +69,15 @@ assert_ok exists &Spark::parse_qualified_ident, "Spark::parse_qualified_ident ex
 assert_ok exists &Spark::quote_ident_if_needed, "Spark::quote_ident_if_needed exists"
 assert_ok exists &Spark::escape_like, "Spark::escape_like exists"
 assert_ok exists &Spark::unescape_like, "Spark::unescape_like exists"
+assert_ok exists &Spark::parse_jdbc_url, "Spark::parse_jdbc_url exists"
+assert_ok exists &Spark::build_jdbc_url, "Spark::build_jdbc_url exists"
+assert_ok exists &Spark::parse_conf, "Spark::parse_conf exists"
+assert_ok exists &Spark::build_conf, "Spark::build_conf exists"
+assert_ok exists &Spark::merge_confs, "Spark::merge_confs exists"
+assert_ok exists &Spark::parse_partition_path, "Spark::parse_partition_path exists"
+assert_ok exists &Spark::build_partition_path, "Spark::build_partition_path exists"
+assert_ok exists &Spark::parse_data_type, "Spark::parse_data_type exists"
+assert_ok exists &Spark::parse_app_id, "Spark::parse_app_id exists"
+assert_ok exists &Spark::split_sql_statements, "Spark::split_sql_statements exists"
 
 test_run
