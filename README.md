@@ -21,6 +21,8 @@ binary so the daily-driver install stays slim.
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-arrow`](https://github.com/MenkeTechnologies/stryke-arrow) · [`stryke-parquet`](https://github.com/MenkeTechnologies/stryke-parquet) · [`stryke-kafka`](https://github.com/MenkeTechnologies/stryke-kafka) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
+### [`Read the Docs`](https://menketechnologies.github.io/stryke-spark/) &middot; [`Engineering Report`](https://menketechnologies.github.io/stryke-spark/report.html)
+
 ---
 
 ## Table of Contents
